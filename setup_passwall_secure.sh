@@ -1,39 +1,63 @@
 #!/bin/sh
 
-# --- БЛОК 0: ПРОВЕРКА СЕТИ И ПОДГОТОВКА ---
-echo ">>> Шаг 0: Проверка сетевого подключения..."
+# =================================================================
+# ================= УЛЬТИМАТИВНЫЙ СКРИПТ v4.0 =======================
+# ============== (Тотальная очистка + Умная установка) =============
+# =================================================================
+
+# --- БЛОК 1: ТОТАЛЬНАЯ ОЧИСТКА ---
+echo ">>> Шаг 1: ТОТАЛЬНАЯ ОЧИСТКА. Удаляем все следы PassWall..."
+
+# 1.1 Останавливаем сервис, если он работает
+if [ -f /etc/init.d/passwall ]; then
+    /etc/init.d/passwall stop >/dev/null 2>&1
+fi
+
+# 1.2 Удаляем пакет
+opkg remove luci-app-passwall >/dev/null 2>&1
+
+# 1.3 Удаляем ВСЕ конфигурационные файлы
+rm -f /etc/config/passwall
+rm -f /etc/config/passwall_server
+rm -f /etc/config/passwall-opkg
+rm -f /etc/config/passwall_server-opkg
+
+# 1.4 Очищаем файл с репозиториями от старых записей
+if [ -f /etc/opkg/customfeeds.conf ]; then
+    sed -i '/passwall/d' /etc/opkg/customfeeds.conf
+fi
+
+# 1.5 Очищаем кэш LuCI
+rm -rf /tmp/luci-*
+
+echo ">>> Очистка завершена. Система готова к чистой установке."
+echo ""
+
+
+# --- БЛОК 2: ЧИСТАЯ УСТАНОВКА ---
+echo ">>> Шаг 2: Проверка сети и установка пакетов..."
+
+# 2.1 Проверка сети
 if ! ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1; then
   echo "ОШИБКА: Нет доступа к интернету. Пожалуйста, проверьте подключение роутера."
   exit 1
 fi
 echo ">>> Сеть доступна."
-echo ""
 
-# --- БЛОК 1: УСТАНОВКА ПАКЕТОВ ---
-echo ">>> Шаг 1: Установка PassWall и необходимых зависимостей..."
-
-# 1.1. Добавление GPG ключа
+# 2.2 Добавление GPG ключа
 wget -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
 opkg-key add /tmp/passwall.pub
 
-# 1.2. Безопасное добавление репозиториев
+# 2.3 Добавление репозиториев
 DISTRIB_RELEASE=$(grep "DISTRIB_RELEASE" /etc/openwrt_release | cut -d "'" -f 2 | cut -d "." -f 1,2)
 DISTRIB_ARCH=$(grep "DISTRIB_ARCH" /etc/openwrt_release | cut -d "'" -f 2)
-LUCI_FEED_URL="src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_luci"
-PACKAGES_FEED_URL="src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_packages"
+echo "src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_luci" >> /etc/opkg/customfeeds.conf
+echo "src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_packages" >> /etc/opkg/customfeeds.conf
 
-if ! grep -q "passwall_luci" /etc/opkg/customfeeds.conf; then
-  echo $LUCI_FEED_URL >> /etc/opkg/customfeeds.conf
-fi
-if ! grep -q "passwall_packages" /etc/opkg/customfeeds.conf; then
-  echo $PACKAGES_FEED_URL >> /etc/opkg/customfeeds.conf
-fi
-
-# 1.3. Обновление списка пакетов с 3 попытками
+# 2.4 Обновление списка пакетов с 3 попытками
 echo "Обновление списков пакетов..."
 for i in 1 2 3; do
   echo "Попытка $i из 3..."
-  rm -f /var/opkg-lists/*
   opkg update
   if [ $? -eq 0 ]; then
     echo "Списки пакетов успешно обновлены."
@@ -48,11 +72,11 @@ for i in 1 2 3; do
   fi
 done
 
-# 1.4. Принудительное удаление dnsmasq
+# 2.5 Принудительное удаление dnsmasq
 echo "Принудительное удаление стандартного dnsmasq..."
 opkg remove dnsmasq >/dev/null 2>&1
 
-# 1.5. Установка основных пакетов с 3 попытками
+# 2.6 Установка основных пакетов с 3 попытками
 echo "Установка основных пакетов..."
 for i in 1 2 3; do
   echo "Попытка установки $i из 3..."
@@ -73,12 +97,10 @@ done
 echo ">>> Установка пакетов завершена."
 echo ""
 
-# --- БЛОК 2: УСИЛЕНИЕ БЕЗОПАСНОСТИ ---
-echo ">>> Шаг 2: Усиление безопасности системы..."
+# --- БЛОК 3: УСИЛЕНИЕ БЕЗОПАСНОСТИ ---
+echo ">>> Шаг 3: Усиление безопасности системы..."
 uci -q delete network.globals.ula_prefix
-for iface in lan wan; do
-    uci -q set network.${iface}.ipv6='0'
-done
+for iface in lan wan; do uci -q set network.${iface}.ipv6='0'; done
 if uci -q get network.wan6 >/dev/null; then
     uci set network.wan6.proto='none'
     uci -q delete network.wan6.ifname
@@ -87,7 +109,6 @@ uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ra='disabled'
 uci -q delete firewall.lan.ip6class
 uci -q delete firewall.wan.ip6class
-
 uci add firewall redirect >/dev/null
 uci set firewall.@redirect[-1].name='Force-DNS-Hijack'
 uci set firewall.@redirect[-1].src='lan'
@@ -95,7 +116,6 @@ uci set firewall.@redirect[-1].proto='tcp udp'
 uci set firewall.@redirect[-1].src_dport='53'
 uci set firewall.@redirect[-1].dest_port='53'
 uci set firewall.@redirect[-1].target='DNAT'
-
 uci add firewall rule >/dev/null
 uci set firewall.@rule[-1].name='Block-STUN-for-WebRTC'
 uci set firewall.@rule[-1].src='lan'
@@ -103,15 +123,14 @@ uci set firewall.@rule[-1].dest='wan'
 uci set firewall.@rule[-1].proto='udp'
 uci set firewall.@rule[-1].dest_port='3478 3479 5349'
 uci set firewall.@rule[-1].target='DROP'
-
 uci commit
 /etc/init.d/network restart
 /etc/init.d/firewall restart
 echo ">>> Усиление безопасности завершено."
 echo ""
 
-# --- БЛОК 3: ИНТЕРАКТИВНЫЙ ВВОД ПОДПИСКИ ---
-echo ">>> Шаг 3: Настройка подписки..."
+# --- БЛОК 4: ИНТЕРАКТИВНЫЙ ВВОД ПОДПИСКИ ---
+echo ">>> Шаг 4: Настройка подписки..."
 echo "Пожалуйста, вставьте ссылку на вашу подписку и нажмите Enter:"
 read -r SUB_URL
 if [ -z "$SUB_URL" ]; then
@@ -121,13 +140,13 @@ fi
 echo ">>> Ссылка на подписку принята."
 echo ""
 
-# --- БЛОК 4: КОНФИГУРАЦИЯ PASSWALL ---
-echo ">>> Шаг 4: Применение вашей персональной конфигурации PassWall..."
+# --- БЛОК 5: КОНФИГУРАЦИЯ PASSWALL ---
+echo ">>> Шаг 5: Применение вашей персональной конфигурации PassWall..."
 uci -q delete passwall
 
 # Глобальные настройки
 uci set passwall.global=global
-uci set passwall.global.enabled='0' # Временно выключен до конца настройки
+uci set passwall.global.enabled='0'
 uci set passwall.global.tcp_proxy_mode='disable'
 uci set passwall.global.udp_proxy_mode='disable'
 uci set passwall.global.dns_shunt='chinadns-ng'
@@ -142,9 +161,9 @@ uci set passwall.global.client_proxy='1'
 
 # Настройки подписки
 uci set passwall.global_subscribe=global_subscribe
-uci set passwall.global_subscribe.filter_keyword_mode='1' # 1 = Keep
-uci add_list passwall.global_subscribe.filter_keep_list='Router_'
+uci set passwall.global_subscribe.filter_keyword_mode='1'
 uci -q delete passwall.global_subscribe.filter_discard_list
+uci add_list passwall.global_subscribe.filter_keep_list='Router_'
 
 # Настройки правил
 uci set passwall.global_rules=global_rules
@@ -174,43 +193,43 @@ uci set passwall.${BALANCING_NODE_ID}.balancingStrategy='leastPing'
 echo ">>> Применение конфигурации PassWall завершено."
 echo ""
 
-# --- БЛОК 5: ОБНОВЛЕНИЕ И ПЕРЕЗАПУСК ---
-echo ">>> Шаг 5: Сохранение, обновление списков и перезапуск службы..."
+# --- БЛОК 6: ОБНОВЛЕНИЕ, СБОРКА БАЛАНСИРОВЩИКА И ЗАПУСК ---
+echo ">>> Шаг 6: Сохранение, обновление подписки и финальная настройка..."
 uci commit passwall
 echo "Конфигурация сохранена."
 
 echo "Запуск обновления подписки... Это может занять некоторое время."
 /usr/share/passwall/app.sh "subscribe_update"
-echo "Обновление подписки завершено."
 
-# "Умное" добавление узлов в балансировщик
+echo "!!! ВАЖНО: Ждем 20 секунд, чтобы подписка успела полностью обновиться..."
+sleep 20
+echo "Пауза завершена."
+
 echo "Добавление узлов из подписки в балансировщик..."
 NODE_LIST=$(uci show passwall | grep ".group='AtlantaRouter'" | cut -d'.' -f2)
 if [ -n "$NODE_LIST" ]; then
+    echo "Найдено узлов для балансировки:"
+    echo "$NODE_LIST"
     for NODE in $NODE_LIST; do
         uci add_list passwall.${BALANCING_NODE_ID}.balancing_node=$NODE
     done
-    echo "Узлы добавлены в балансировщик."
+    echo "Узлы успешно добавлены в балансировщик."
 else
-    echo "Предупреждение: Узлы с группой 'AtlantaRouter' не найдены после обновления подписки."
+    echo "ПРЕДУПРЕЖДЕНИЕ: Узлы с группой 'AtlantaRouter' не найдены после обновления. Балансировщик будет пустым."
 fi
 
-# Назначаем узел балансировки основным и включаем Passwall
 uci set passwall.@global[0].tcp_node="${BALANCING_NODE_ID}"
 uci set passwall.@global[0].udp_node="${BALANCING_NODE_ID}"
 uci set passwall.@global[0].enabled='1'
 uci commit passwall
 
-# Перезапускаем службу для применения всех настроек
 /etc/init.d/passwall restart
 echo "Служба PassWall перезапущена."
 echo ""
-echo ">>> Автоматическая настройка PassWall полностью завершена!"
-echo ""
 
-# --- БЛОК 6: УСТАНОВКА ПАТЧА И ОЧИСТКА КЭША ---
-echo ">>> Шаг 6: Установка патча и очистка кэша LuCI..."
-# (Здесь идет ваш скрипт-патч, он остается без изменений)
+# --- БЛОК 7: УСТАНОВКА ПАТЧА И ОЧИСТКА КЭША ---
+echo ">>> Шаг 7: Установка патча и очистка кэша LuCI..."
+# (Ваш скрипт-патч)
 cat > /tmp/install.sh << 'FINALSCRIPT'
 #!/bin/sh
 echo "=========================================="
@@ -418,7 +437,7 @@ uci commit passwall
 if [ -f /etc/init.d/passwall ] && ! grep -q "helper_expand_groups" /etc/init.d/passwall; then
     sed -i '/start_service()/a\\	lua /usr/share/passwall/helper_expand_groups.lua 2>/dev/null || true' /etc/init.d/passwall
 fi
-rm -rf /tmp/luci-* /tmp/patch_ray.lua
+rm -rf /tmp/luci-*
 /etc/init.d/uhttpd restart
 echo ""
 echo "=========================================="
