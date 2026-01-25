@@ -124,162 +124,52 @@ echo ""
 # --- БЛОК 4: КОНФИГУРАЦИЯ PASSWALL ---
 echo ">>> Шаг 4: Применение вашей персональной конфигурации PassWall..."
 uci -q delete passwall
-# (Здесь идет ваш большой блок команд uci set... он остается без изменений)
+
+# Глобальные настройки
 uci set passwall.global=global
-uci set passwall.global.enabled='1'
-uci set passwall.global.socks_enabled='0'
-uci set passwall.global.filter_proxy_ipv6='0'
+uci set passwall.global.enabled='0' # Временно выключен до конца настройки
+uci set passwall.global.tcp_proxy_mode='disable'
+uci set passwall.global.udp_proxy_mode='disable'
 uci set passwall.global.dns_shunt='chinadns-ng'
 uci set passwall.global.dns_mode='xray'
 uci set passwall.global.remote_dns='1.1.1.1'
-uci add_list passwall.global.smartdns_remote_dns='https://1.1.1.1/dns-query'
-uci set passwall.global.dns_redirect='1'
-uci set passwall.global.use_gfw_list='0'
+uci set passwall.global.remote_dns_doh='8.8.8.8'
+uci set passwall.global.v2ray_dns_mode='tcp+doh'
+uci set passwall.global.filter_proxy_ipv6='0'
 uci set passwall.global.chn_list='proxy'
-uci set passwall.global.tcp_proxy_mode='disable'
-uci set passwall.global.udp_proxy_mode='disable'
 uci set passwall.global.localhost_proxy='1'
 uci set passwall.global.client_proxy='1'
-uci set passwall.global.acl_enable='0'
-uci set passwall.global.log_tcp='1'
-uci set passwall.global.log_udp='1'
-uci set passwall.global.loglevel='debug'
-uci set passwall.global.trojan_loglevel='4'
-uci set passwall.global.log_chinadns_ng='1'
-uci set passwall.global.force_https_soa='1'
-uci set passwall.global.tcp_node_socks_port='1080'
-uci set passwall.global.use_block_list='0'
-uci set passwall.global.v2ray_dns_mode='tcp+doh'
-uci set passwall.global.remote_dns_doh='https://8.8.8.8/dns-query'
-uci set passwall.global.use_direct_list='0'
-uci set passwall.global_haproxy=global_haproxy
-uci set passwall.global_haproxy.balancing_enable='0'
-uci set passwall.global_delay=global_delay
-uci set passwall.global_delay.start_daemon='1'
-uci set passwall.global_delay.start_delay='60'
-uci set passwall.global_forwarding=global_forwarding
-uci set passwall.global_forwarding.tcp_no_redir_ports='disable'
-uci set passwall.global_forwarding.udp_no_redir_ports='disable'
-uci set passwall.global_forwarding.tcp_proxy_drop_ports='disable'
-uci set passwall.global_forwarding.udp_proxy_drop_ports='443'
-uci set passwall.global_forwarding.tcp_redir_ports='1:65535'
-uci set passwall.global_forwarding.udp_redir_ports='1:65535'
-uci set passwall.global_forwarding.accept_icmp='0'
-uci set passwall.global_forwarding.prefer_nft='1'
-uci set passwall.global_forwarding.tcp_proxy_way='redirect'
-uci set passwall.global_forwarding.ipv6_tproxy='0'
-uci set passwall.global_xray=global_xray
-uci set passwall.global_xray.sniffing_override_dest='0'
-uci set passwall.global_xray.fragment='0'
-uci set passwall.global_xray.noise='0'
-uci set passwall.global_singbox=global_singbox
-uci set passwall.global_singbox.sniff_override_destination='0'
-uci set passwall.global_other=global_other
-uci set passwall.global_other.auto_detection_time='tcping'
-uci set passwall.global_other.show_node_info='0'
-uci set passwall.global_other.enable_group_balancing='1'
+
+# Настройки подписки
+uci set passwall.global_subscribe=global_subscribe
+uci set passwall.global_subscribe.filter_keyword_mode='1' # 1 = Keep
+uci add_list passwall.global_subscribe.filter_keep_list='Router_'
+uci -q delete passwall.global_subscribe.filter_discard_list
+
+# Настройки правил
 uci set passwall.global_rules=global_rules
-uci set passwall.global_rules.auto_update='0'
-uci set passwall.global_rules.chnlist_update='1'
-uci set passwall.global_rules.chnroute_update='0'
-uci set passwall.global_rules.chnroute6_update='0'
-uci set passwall.global_rules.gfwlist_update='0'
-uci set passwall.global_rules.geosite_update='0'
-uci set passwall.global_rules.geoip_update='0'
-uci add_list passwall.global_rules.gfwlist_url='https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/gfw.txt'
-uci set passwall.global_rules.v2ray_location_asset='/usr/share/v2ray/'
-uci set passwall.global_rules.geoip_url='https://github.com/Loyalsoldier/geoip/releases/latest/download/geoip.dat'
-uci set passwall.global_rules.geosite_url='https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat'
-uci set passwall.global_rules.geo2rule='0'
-uci set passwall.global_rules.enable_geoview='0'
+uci -q delete passwall.global_rules.gfwlist_url
+uci -q delete passwall.global_rules.chnroute_url
+uci -q delete passwall.global_rules.chnroute6_url
+uci -q delete passwall.global_rules.chnlist_url
 uci add_list passwall.global_rules.chnlist_url='http://origin.all-streams-24.ru/domenchik.lst'
 uci add_list passwall.global_rules.chnlist_url='https://raw.githubusercontent.com/UnionUnllimited/domensrouter/refs/heads/main/manual.lst'
 uci add_list passwall.global_rules.chnlist_url='https://storage.yandexcloud.net/domenchik/domenchik.lst'
 uci add_list passwall.global_rules.chnlist_url='https://raw.githubusercontent.com/UnionUnllimited/domensrouter/refs/heads/main/domenchik.lst'
-uci set passwall.global_app=global_app
-uci set passwall.global_app.sing_box_file='/usr/bin/sing-box'
-uci set passwall.global_app.xray_file='/usr/bin/xray'
-uci set passwall.global_app.hysteria_file='/usr/bin/hysteria'
-uci set passwall.global_subscribe=global_subscribe
-uci set passwall.global_subscribe.filter_keyword_mode='2'
-uci set passwall.global_subscribe.ss_type='xray'
-uci set passwall.global_subscribe.trojan_type='xray'
-uci set passwall.global_subscribe.vmess_type='xray'
-uci set passwall.global_subscribe.vless_type='xray'
-uci add_list passwall.global_subscribe.filter_keep_list='Router_'
+uci set passwall.global_rules.chnlist_update='1'
+
+# Добавляем подписку
 SUB_ID=$(uci add passwall subscribe_list)
 uci set passwall.${SUB_ID}.remark='AtlantaRouter'
 uci set passwall.${SUB_ID}.url="${SUB_URL}"
-uci set passwall.${SUB_ID}.allowInsecure='0'
-uci set passwall.${SUB_ID}.filter_keyword_mode='5'
-uci set passwall.${SUB_ID}.ss_type='global'
-uci set passwall.${SUB_ID}.trojan_type='global'
-uci set passwall.${SUB_ID}.vmess_type='global'
-uci set passwall.${SUB_ID}.vless_type='global'
-uci set passwall.${SUB_ID}.domain_strategy='global'
 uci set passwall.${SUB_ID}.auto_update='1'
-uci set passwall.${SUB_ID}.week_update='8'
-uci set passwall.${SUB_ID}.interval_update='1'
-uci set passwall.${SUB_ID}.user_agent='passwall'
+
+# Создаем узел балансировки
 BALANCING_NODE_ID=$(uci add passwall nodes)
 uci set passwall.${BALANCING_NODE_ID}.remarks='AtlantaSwitch'
 uci set passwall.${BALANCING_NODE_ID}.type='Xray'
 uci set passwall.${BALANCING_NODE_ID}.protocol='_balancing'
 uci set passwall.${BALANCING_NODE_ID}.balancingStrategy='leastPing'
-uci set passwall.${BALANCING_NODE_ID}.useCustomProbeUrl='1'
-uci set passwall.${BALANCING_NODE_ID}.probeUrl='https://www.google.com/generate_204'
-uci set passwall.${BALANCING_NODE_ID}.probeInterval='5m'
-uci add_list passwall.${BALANCING_NODE_ID}.balancing_node=''
-NODE_1_ID=$(uci add passwall nodes)
-uci set passwall.${NODE_1_ID}.remarks='Router_Finland_1'
-uci set passwall.${NODE_1_ID}.group='AtlantaRouter'
-uci set passwall.${NODE_1_ID}.type='Xray'
-uci set passwall.${NODE_1_ID}.protocol='vless'
-uci set passwall.${NODE_1_ID}.address='171.22.114.82'
-uci set passwall.${NODE_1_ID}.port='8444'
-uci set passwall.${NODE_1_ID}.uuid='77081c57-b7af-40d9-90a4-29fffd2bef59'
-uci set passwall.${NODE_1_ID}.encryption='none'
-uci set passwall.${NODE_1_ID}.flow='xtls-rprx-vision'
-uci set passwall.${NODE_1_ID}.transport='raw'
-uci set passwall.${NODE_1_ID}.security='reality'
-uci set passwall.${NODE_1_ID}.reality_publicKey='HvLgNF130dDx79APv_HflZ7zFPy3smQS07W_VvZJDxM'
-uci set passwall.${NODE_1_ID}.tls_serverName='pimg.mycdn.me'
-uci set passwall.${NODE_1_ID}.fingerprint='random'
-uci set passwall.${NODE_1_ID}.utls='1'
-NODE_2_ID=$(uci add passwall nodes)
-uci set passwall.${NODE_2_ID}.remarks='Router_Netherlands_1'
-uci set passwall.${NODE_2_ID}.group='AtlantaRouter'
-uci set passwall.${NODE_2_ID}.type='Xray'
-uci set passwall.${NODE_2_ID}.protocol='vless'
-uci set passwall.${NODE_2_ID}.address='176.222.53.230'
-uci set passwall.${NODE_2_ID}.port='8444'
-uci set passwall.${NODE_2_ID}.uuid='77081c57-b7af-40d9-90a4-29fffd2bef59'
-uci set passwall.${NODE_2_ID}.encryption='none'
-uci set passwall.${NODE_2_ID}.flow='xtls-rprx-vision'
-uci set passwall.${NODE_2_ID}.transport='raw'
-uci set passwall.${NODE_2_ID}.security='reality'
-uci set passwall.${NODE_2_ID}.reality_publicKey='HvLgNF130dDx79APv_HflZ7zFPy3smQS07W_VvZJDxM'
-uci set passwall.${NODE_2_ID}.tls_serverName='pimg.mycdn.me'
-uci set passwall.${NODE_2_ID}.fingerprint='random'
-uci set passwall.${NODE_2_ID}.utls='1'
-NODE_3_ID=$(uci add passwall nodes)
-uci set passwall.${NODE_3_ID}.remarks='Router_Foreign_Bridge_1'
-uci set passwall.${NODE_3_ID}.group='AtlantaRouter'
-uci set passwall.${NODE_3_ID}.type='Xray'
-uci set passwall.${NODE_3_ID}.protocol='vless'
-uci set passwall.${NODE_3_ID}.address='91.218.115.214'
-uci set passwall.${NODE_3_ID}.port='8444'
-uci set passwall.${NODE_3_ID}.uuid='77081c57-b7af-40d9-90a4-29fffd2bef59'
-uci set passwall.${NODE_3_ID}.encryption='none'
-uci set passwall.${NODE_3_ID}.flow='xtls-rprx-vision'
-uci set passwall.${NODE_3_ID}.transport='raw'
-uci set passwall.${NODE_3_ID}.security='reality'
-uci set passwall.${NODE_3_ID}.reality_publicKey='iXJP7ECVE9Rd9iSX18GlrmSI7AQiD9c03Q8ZixMfj0k'
-uci set passwall.${NODE_3_ID}.tls_serverName='pimg.mycdn.me'
-uci set passwall.${NODE_3_ID}.fingerprint='random'
-uci set passwall.${NODE_3_ID}.utls='1'
-uci set passwall.@global[0].tcp_node="${BALANCING_NODE_ID}"
-uci set passwall.@global[0].udp_node="${BALANCING_NODE_ID}"
 
 echo ">>> Применение конфигурации PassWall завершено."
 echo ""
@@ -288,17 +178,38 @@ echo ""
 echo ">>> Шаг 5: Сохранение, обновление списков и перезапуск службы..."
 uci commit passwall
 echo "Конфигурация сохранена."
+
 echo "Запуск обновления подписки... Это может занять некоторое время."
 /usr/share/passwall/app.sh "subscribe_update"
 echo "Обновление подписки завершено."
+
+# "Умное" добавление узлов в балансировщик
+echo "Добавление узлов из подписки в балансировщик..."
+NODE_LIST=$(uci show passwall | grep ".group='AtlantaRouter'" | cut -d'.' -f2)
+if [ -n "$NODE_LIST" ]; then
+    for NODE in $NODE_LIST; do
+        uci add_list passwall.${BALANCING_NODE_ID}.balancing_node=$NODE
+    done
+    echo "Узлы добавлены в балансировщик."
+else
+    echo "Предупреждение: Узлы с группой 'AtlantaRouter' не найдены после обновления подписки."
+fi
+
+# Назначаем узел балансировки основным и включаем Passwall
+uci set passwall.@global[0].tcp_node="${BALANCING_NODE_ID}"
+uci set passwall.@global[0].udp_node="${BALANCING_NODE_ID}"
+uci set passwall.@global[0].enabled='1'
+uci commit passwall
+
+# Перезапускаем службу для применения всех настроек
 /etc/init.d/passwall restart
 echo "Служба PassWall перезапущена."
 echo ""
 echo ">>> Автоматическая настройка PassWall полностью завершена!"
 echo ""
 
-# --- БЛОК 6: УСТАНОВКА ПАТЧА ---
-echo ">>> Шаг 6: Установка патча для выбора групп в узлах балансировки..."
+# --- БЛОК 6: УСТАНОВКА ПАТЧА И ОЧИСТКА КЭША ---
+echo ">>> Шаг 6: Установка патча и очистка кэша LuCI..."
 # (Здесь идет ваш скрипт-патч, он остается без изменений)
 cat > /tmp/install.sh << 'FINALSCRIPT'
 #!/bin/sh
