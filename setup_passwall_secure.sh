@@ -1,113 +1,113 @@
 #!/bin/sh
 
+# --- БЛОК 0: ПРОВЕРКА СЕТИ И ПОДГОТОВКА ---
+echo ">>> Шаг 0: Проверка сетевого подключения..."
+if ! ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1; then
+  echo "ОШИБКА: Нет доступа к интернету. Пожалуйста, проверьте подключение роутера."
+  exit 1
+fi
+echo ">>> Сеть доступна."
+echo ""
+
 # --- БЛОК 1: УСТАНОВКА ПАКЕТОВ ---
 echo ">>> Шаг 1: Установка PassWall и необходимых зависимостей..."
 
-# 1.1. Добавление GPG ключа для репозитория PassWall
-wget -O passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
-opkg-key add passwall.pub
+# 1.1. Добавление GPG ключа
+wget -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
+opkg-key add /tmp/passwall.pub
 
-# 1.2. Автоматическое определение архитектуры и версии OpenWrt для добавления репозиториев
+# 1.2. Безопасное добавление репозиториев (с проверкой на дубликаты)
 DISTRIB_RELEASE=$(grep "DISTRIB_RELEASE" /etc/openwrt_release | cut -d "'" -f 2 | cut -d "." -f 1,2)
 DISTRIB_ARCH=$(grep "DISTRIB_ARCH" /etc/openwrt_release | cut -d "'" -f 2)
+LUCI_FEED_URL="src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_luci"
+PACKAGES_FEED_URL="src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_packages"
 
-# Добавляем фиды PassWall в customfeeds.conf
-echo "src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_luci" >> /etc/opkg/customfeeds.conf
-echo "src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_packages" >> /etc/opkg/customfeeds.conf
+if ! grep -q "passwall_luci" /etc/opkg/customfeeds.conf; then
+  echo $LUCI_FEED_URL >> /etc/opkg/customfeeds.conf
+  echo "Репозиторий passwall_luci добавлен."
+fi
+if ! grep -q "passwall_packages" /etc/opkg/customfeeds.conf; then
+  echo $PACKAGES_FEED_URL >> /etc/opkg/customfeeds.conf
+  echo "Репозиторий passwall_packages добавлен."
+fi
 
 # 1.3. Обновление списка пакетов
 opkg update
 
-# 1.4. Установка PassWall и ключевых зависимостей из вашей конфигурации
-opkg install luci-app-passwall dnsmasq-full xray-core chinadns-ng ipset ipt2socks iptables-mod-tproxy 
+# 1.4. Принудительное удаление dnsmasq для избежания конфликта
+echo "Принудительное удаление стандартного dnsmasq..."
+opkg remove dnsmasq
+
+# 1.5. Установка PassWall и ключевых зависимостей
+echo "Установка основных пакетов..."
+opkg install luci-app-passwall dnsmasq-full xray-core chinadns-ng ipset ipt2socks iptables-mod-tproxy
+
+# 1.6. Проверка успешной установки
+if ! opkg list-installed | grep -q "luci-app-passwall"; then
+    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить luci-app-passwall. Проверьте лог выше на предмет ошибок скачивания или конфликтов. Прерывание скрипта."
+    exit 1
+fi
 
 echo ">>> Установка пакетов завершена."
 echo ""
 
-# --- БЛОК 2: УСИЛЕНИЕ БЕЗОПАСНОСТИ (ОТКЛЮЧЕНИЕ IPV6, ЗАЩИТА ОТ УТЕЧЕК DNS И WEBRTC) ---
+# --- БЛОК 2: УСИЛЕНИЕ БЕЗОПАСНОСТИ ---
 echo ">>> Шаг 2: Усиление безопасности системы..."
-
-# 2.1. Полное отключение IPv6 на системном уровне
-echo "Отключение IPv6..."
-uci set network.lan.ipv6='0'
-uci set network.wan.ipv6='0'
-uci set network.wan6.proto='none'
-uci -q delete network.wan6.ifname
+# (Команды для отключения IPv6 и защиты от утечек)
 uci -q delete network.globals.ula_prefix
+for iface in lan wan; do
+    uci set network.${iface}.ipv6='0'
+done
+if uci -q get network.wan6 >/dev/null; then
+    uci set network.wan6.proto='none'
+    uci -q delete network.wan6.ifname
+fi
 uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ra='disabled'
-uci set sysctl.net.ipv6.conf.all.forwarding='0'
-uci set sysctl.net.ipv6.conf.default.forwarding='0'
-echo "IPv6 отключен."
+uci -q delete firewall.lan.ip6class
+uci -q delete firewall.wan.ip6class
 
-# 2.2. Предотвращение утечек DNS (DNS Leak)
-# Создаем правило файрвола, которое перехватывает все DNS-запросы (порт 53) от клиентов
-# и принудительно перенаправляет их на сам роутер. Это гарантирует, что DNS будет
-# обрабатываться только через PassWall, даже если на устройствах прописаны сторонние DNS.
-echo "Настройка правила для перехвата DNS-запросов..."
-uci add firewall redirect
+uci add firewall redirect >/dev/null
 uci set firewall.@redirect[-1].name='Force-DNS-Hijack'
 uci set firewall.@redirect[-1].src='lan'
 uci set firewall.@redirect[-1].proto='tcp udp'
 uci set firewall.@redirect[-1].src_dport='53'
 uci set firewall.@redirect[-1].dest_port='53'
 uci set firewall.@redirect[-1].target='DNAT'
-echo "Правило перехвата DNS создано."
 
-# 2.3. Митигация утечек WebRTC
-# ВАЖНО: WebRTC утечки - это в первую очередь проблема браузера.
-# Этот метод не дает 100% гарантии, но блокирует запросы к серверам STUN
-# на самых распространенных портах. Для полной защиты используйте специальные
-# расширения в браузере (например, uBlock Origin, WebRTC Leak Prevent).
-echo "Добавление правила для блокировки стандартных портов STUN (WebRTC)..."
-uci add firewall rule
+uci add firewall rule >/dev/null
 uci set firewall.@rule[-1].name='Block-STUN-for-WebRTC'
 uci set firewall.@rule[-1].src='lan'
 uci set firewall.@rule[-1].dest='wan'
 uci set firewall.@rule[-1].proto='udp'
-uci set firewall.@rule[-1].dest_port='3478 3479 5349' # Стандартные порты STUN/TURN
+uci set firewall.@rule[-1].dest_port='3478 3479 5349'
 uci set firewall.@rule[-1].target='DROP'
-echo "Правило для митигации утечек WebRTC добавлено."
 
-# 2.4. Применение системных настроек и перезапуск служб
-echo "Применение системных настроек..."
-uci commit network
-uci commit dhcp
-uci commit sysctl
-uci commit firewall
+uci commit
 /etc/init.d/network restart
 /etc/init.d/firewall restart
 echo ">>> Усиление безопасности завершено."
 echo ""
 
-
 # --- БЛОК 3: ИНТЕРАКТИВНЫЙ ВВОД ПОДПИСКИ ---
 echo ">>> Шаг 3: Настройка подписки..."
-echo "Пожалуйста, вставьте ссылку на вашу подписку (например, https://...) и нажмите Enter:"
+echo "Пожалуйста, вставьте ссылку на вашу подписку и нажмите Enter:"
 read -r SUB_URL
-
 if [ -z "$SUB_URL" ]; then
   echo "Ошибка: Ссылка на подписку не была введена. Прерывание скрипта."
   exit 1
 fi
-
 echo ">>> Ссылка на подписку принята."
 echo ""
 
-# --- БЛОК 4: ОЧИСТКА СТАРОЙ КОНФИГУРАЦИИ И ПРИМЕНЕНИЕ НОВОЙ ---
+# --- БЛОК 4: КОНФИГУРАЦИЯ PASSWALL ---
 echo ">>> Шаг 4: Применение вашей персональной конфигурации PassWall..."
-
-# 4.1. Полная очистка предыдущих настроек PassWall
 uci -q delete passwall
-uci commit passwall
-
-# 4.2. Применение вашей конфигурации через UCI
-
-# --- Глобальные секции ---
+# (Здесь идет ваш большой блок команд uci set... он остается без изменений)
 uci set passwall.global=global
 uci set passwall.global.enabled='1'
 uci set passwall.global.socks_enabled='0'
-uci set passwall.global.filter_proxy_ipv6='0' # Отключено, так как IPv6 полностью выключен
+uci set passwall.global.filter_proxy_ipv6='0'
 uci set passwall.global.dns_shunt='chinadns-ng'
 uci set passwall.global.dns_mode='xray'
 uci set passwall.global.remote_dns='1.1.1.1'
@@ -131,14 +131,11 @@ uci set passwall.global.use_block_list='0'
 uci set passwall.global.v2ray_dns_mode='tcp+doh'
 uci set passwall.global.remote_dns_doh='https://8.8.8.8/dns-query'
 uci set passwall.global.use_direct_list='0'
-
 uci set passwall.global_haproxy=global_haproxy
 uci set passwall.global_haproxy.balancing_enable='0'
-
 uci set passwall.global_delay=global_delay
 uci set passwall.global_delay.start_daemon='1'
 uci set passwall.global_delay.start_delay='60'
-
 uci set passwall.global_forwarding=global_forwarding
 uci set passwall.global_forwarding.tcp_no_redir_ports='disable'
 uci set passwall.global_forwarding.udp_no_redir_ports='disable'
@@ -149,21 +146,17 @@ uci set passwall.global_forwarding.udp_redir_ports='1:65535'
 uci set passwall.global_forwarding.accept_icmp='0'
 uci set passwall.global_forwarding.prefer_nft='1'
 uci set passwall.global_forwarding.tcp_proxy_way='redirect'
-uci set passwall.global_forwarding.ipv6_tproxy='0' # Отключено
-
+uci set passwall.global_forwarding.ipv6_tproxy='0'
 uci set passwall.global_xray=global_xray
 uci set passwall.global_xray.sniffing_override_dest='0'
 uci set passwall.global_xray.fragment='0'
 uci set passwall.global_xray.noise='0'
-
 uci set passwall.global_singbox=global_singbox
 uci set passwall.global_singbox.sniff_override_destination='0'
-
 uci set passwall.global_other=global_other
 uci set passwall.global_other.auto_detection_time='tcping'
 uci set passwall.global_other.show_node_info='0'
 uci set passwall.global_other.enable_group_balancing='1'
-
 uci set passwall.global_rules=global_rules
 uci set passwall.global_rules.auto_update='0'
 uci set passwall.global_rules.chnlist_update='1'
@@ -182,12 +175,10 @@ uci add_list passwall.global_rules.chnlist_url='http://origin.all-streams-24.ru/
 uci add_list passwall.global_rules.chnlist_url='https://raw.githubusercontent.com/UnionUnllimited/domensrouter/refs/heads/main/manual.lst'
 uci add_list passwall.global_rules.chnlist_url='https://storage.yandexcloud.net/domenchik/domenchik.lst'
 uci add_list passwall.global_rules.chnlist_url='https://raw.githubusercontent.com/UnionUnllimited/domensrouter/refs/heads/main/domenchik.lst'
-
 uci set passwall.global_app=global_app
 uci set passwall.global_app.sing_box_file='/usr/bin/sing-box'
 uci set passwall.global_app.xray_file='/usr/bin/xray'
 uci set passwall.global_app.hysteria_file='/usr/bin/hysteria'
-
 uci set passwall.global_subscribe=global_subscribe
 uci set passwall.global_subscribe.filter_keyword_mode='2'
 uci set passwall.global_subscribe.ss_type='xray'
@@ -195,11 +186,9 @@ uci set passwall.global_subscribe.trojan_type='xray'
 uci set passwall.global_subscribe.vmess_type='xray'
 uci set passwall.global_subscribe.vless_type='xray'
 uci add_list passwall.global_subscribe.filter_keep_list='Router_'
-
-# --- Секция подписки ---
 SUB_ID=$(uci add passwall subscribe_list)
 uci set passwall.${SUB_ID}.remark='AtlantaRouter'
-uci set passwall.${SUB_ID}.url="${SUB_URL}" # Используем введенную ссылку
+uci set passwall.${SUB_ID}.url="${SUB_URL}"
 uci set passwall.${SUB_ID}.allowInsecure='0'
 uci set passwall.${SUB_ID}.filter_keyword_mode='5'
 uci set passwall.${SUB_ID}.ss_type='global'
@@ -211,8 +200,6 @@ uci set passwall.${SUB_ID}.auto_update='1'
 uci set passwall.${SUB_ID}.week_update='8'
 uci set passwall.${SUB_ID}.interval_update='1'
 uci set passwall.${SUB_ID}.user_agent='passwall'
-
-# --- Секции узлов (Nodes) ---
 BALANCING_NODE_ID=$(uci add passwall nodes)
 uci set passwall.${BALANCING_NODE_ID}.remarks='AtlantaSwitch'
 uci set passwall.${BALANCING_NODE_ID}.type='Xray'
@@ -222,7 +209,6 @@ uci set passwall.${BALANCING_NODE_ID}.useCustomProbeUrl='1'
 uci set passwall.${BALANCING_NODE_ID}.probeUrl='https://www.google.com/generate_204'
 uci set passwall.${BALANCING_NODE_ID}.probeInterval='5m'
 uci add_list passwall.${BALANCING_NODE_ID}.balancing_node=''
-
 NODE_1_ID=$(uci add passwall nodes)
 uci set passwall.${NODE_1_ID}.remarks='Router_Finland_1'
 uci set passwall.${NODE_1_ID}.group='AtlantaRouter'
@@ -239,7 +225,6 @@ uci set passwall.${NODE_1_ID}.reality_publicKey='HvLgNF130dDx79APv_HflZ7zFPy3smQ
 uci set passwall.${NODE_1_ID}.tls_serverName='pimg.mycdn.me'
 uci set passwall.${NODE_1_ID}.fingerprint='random'
 uci set passwall.${NODE_1_ID}.utls='1'
-
 NODE_2_ID=$(uci add passwall nodes)
 uci set passwall.${NODE_2_ID}.remarks='Router_Netherlands_1'
 uci set passwall.${NODE_2_ID}.group='AtlantaRouter'
@@ -256,7 +241,6 @@ uci set passwall.${NODE_2_ID}.reality_publicKey='HvLgNF130dDx79APv_HflZ7zFPy3smQ
 uci set passwall.${NODE_2_ID}.tls_serverName='pimg.mycdn.me'
 uci set passwall.${NODE_2_ID}.fingerprint='random'
 uci set passwall.${NODE_2_ID}.utls='1'
-
 NODE_3_ID=$(uci add passwall nodes)
 uci set passwall.${NODE_3_ID}.remarks='Router_Foreign_Bridge_1'
 uci set passwall.${NODE_3_ID}.group='AtlantaRouter'
@@ -273,8 +257,6 @@ uci set passwall.${NODE_3_ID}.reality_publicKey='iXJP7ECVE9Rd9iSX18GlrmSI7AQiD9c
 uci set passwall.${NODE_3_ID}.tls_serverName='pimg.mycdn.me'
 uci set passwall.${NODE_3_ID}.fingerprint='random'
 uci set passwall.${NODE_3_ID}.utls='1'
-
-# 4.3. Назначаем узел балансировки основным для TCP и UDP
 uci set passwall.@global[0].tcp_node="${BALANCING_NODE_ID}"
 uci set passwall.@global[0].udp_node="${BALANCING_NODE_ID}"
 
@@ -283,26 +265,20 @@ echo ""
 
 # --- БЛОК 5: ОБНОВЛЕНИЕ И ПЕРЕЗАПУСК ---
 echo ">>> Шаг 5: Сохранение, обновление списков и перезапуск службы..."
-
-# 5.1. Сохраняем все изменения
 uci commit passwall
 echo "Конфигурация сохранена."
-
-# 5.2. Принудительно обновляем списки и узлы из подписки
 echo "Запуск обновления подписки... Это может занять некоторое время."
 /usr/share/passwall/app.sh "subscribe_update"
 echo "Обновление подписки завершено."
-
-# 5.3. Перезапускаем службу PassWall для применения всех настроек
 /etc/init.d/passwall restart
 echo "Служба PassWall перезапущена."
 echo ""
 echo ">>> Автоматическая настройка PassWall полностью завершена!"
 echo ""
 
-# --- БЛОК 6: УСТАНОВКА ПАТЧА ДЛЯ ГРУППИРОВКИ УЗЛОВ ---
+# --- БЛОК 6: УСТАНОВКА ПАТЧА ---
 echo ">>> Шаг 6: Установка патча для выбора групп в узлах балансировки..."
-
+# (Здесь идет ваш скрипт-патч, он остается без изменений)
 cat > /tmp/install.sh << 'FINALSCRIPT'
 #!/bin/sh
 echo "=========================================="
@@ -519,9 +495,5 @@ echo "=========================================="
 echo "Бэкап: $BACKUP_DIR"
 echo "Теперь в Balancing только группы!"
 FINALSCRIPT
-
-# --- ЗАПУСК ПАТЧА ---
 chmod +x /tmp/install.sh && /tmp/install.sh
-
 echo ">>> Установка патча завершена."
-
