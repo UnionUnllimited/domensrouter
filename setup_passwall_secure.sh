@@ -19,7 +19,7 @@ echo "src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt
 opkg update
 
 # 1.4. Установка PassWall и ключевых зависимостей из вашей конфигурации
-opkg install luci-app-passwall dnsmasq-full xray-core chinadns-ng ipset ipt2socks iptables-mod-tproxy hysteria sing-box
+opkg install luci-app-passwall dnsmasq-full xray-core chinadns-ng ipset ipt2socks iptables-mod-tproxy 
 
 echo ">>> Установка пакетов завершена."
 echo ""
@@ -524,3 +524,4 @@ FINALSCRIPT
 chmod +x /tmp/install.sh && /tmp/install.sh
 
 echo ">>> Установка патча завершена."
+
