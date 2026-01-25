@@ -1,60 +1,49 @@
 #!/bin/sh
 
 # =================================================================
-# ================= УЛЬТИМАТИВНЫЙ СКРИПТ v4.0 =======================
-# ============== (Тотальная очистка + Умная установка) =============
+# ================ УЛЬТИМАТИВНЫЙ СКРИПТ v5.0 ======================
+# === (Тотальная очистка + Синхронизация времени + Умная установка) ==
 # =================================================================
+
+# --- БЛОК 0: СИНХРОНИЗАЦИЯ ВРЕМЕНИ ---
+echo ">>> Шаг 0: Принудительная синхронизация времени системы..."
+ntpd -n -q -p 8.8.8.8
+sleep 5 # Даем время на синхронизацию
+CURRENT_YEAR=$(date +%Y)
+if [ "$CURRENT_YEAR" -lt 2024 ]; then
+    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось синхронизировать время. Текущий год: $CURRENT_YEAR. Проверьте доступ роутера в интернет."
+    exit 1
+fi
+echo ">>> Время успешно синхронизировано. Текущая дата: $(date)"
+echo ""
 
 # --- БЛОК 1: ТОТАЛЬНАЯ ОЧИСТКА ---
 echo ">>> Шаг 1: ТОТАЛЬНАЯ ОЧИСТКА. Удаляем все следы PassWall..."
-
-# 1.1 Останавливаем сервис, если он работает
 if [ -f /etc/init.d/passwall ]; then
     /etc/init.d/passwall stop >/dev/null 2>&1
 fi
-
-# 1.2 Удаляем пакет
 opkg remove luci-app-passwall >/dev/null 2>&1
-
-# 1.3 Удаляем ВСЕ конфигурационные файлы
-rm -f /etc/config/passwall
-rm -f /etc/config/passwall_server
-rm -f /etc/config/passwall-opkg
-rm -f /etc/config/passwall_server-opkg
-
-# 1.4 Очищаем файл с репозиториями от старых записей
+rm -f /etc/config/passwall*
 if [ -f /etc/opkg/customfeeds.conf ]; then
     sed -i '/passwall/d' /etc/opkg/customfeeds.conf
 fi
-
-# 1.5 Очищаем кэш LuCI
 rm -rf /tmp/luci-*
-
-echo ">>> Очистка завершена. Система готова к чистой установке."
+echo ">>> Очистка завершена."
 echo ""
 
-
 # --- БЛОК 2: ЧИСТАЯ УСТАНОВКА ---
-echo ">>> Шаг 2: Проверка сети и установка пакетов..."
-
-# 2.1 Проверка сети
-if ! ping -c 1 -W 5 8.8.8.8 > /dev/null 2>&1; then
-  echo "ОШИБКА: Нет доступа к интернету. Пожалуйста, проверьте подключение роутера."
-  exit 1
-fi
-echo ">>> Сеть доступна."
-
-# 2.2 Добавление GPG ключа
-wget -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
+echo ">>> Шаг 2: Установка пакетов..."
+# 2.1 Добавление GPG ключа (с отключением проверки сертификата для надежности)
+wget --no-check-certificate -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
 opkg-key add /tmp/passwall.pub
 
-# 2.3 Добавление репозиториев
+# 2.2 Добавление репозиториев
 DISTRIB_RELEASE=$(grep "DISTRIB_RELEASE" /etc/openwrt_release | cut -d "'" -f 2 | cut -d "." -f 1,2)
 DISTRIB_ARCH=$(grep "DISTRIB_ARCH" /etc/openwrt_release | cut -d "'" -f 2)
 echo "src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_luci" >> /etc/opkg/customfeeds.conf
 echo "src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_packages" >> /etc/opkg/customfeeds.conf
 
-# 2.4 Обновление списка пакетов с 3 попытками
+# 2.3 Обновление списка пакетов с 3 попытками
 echo "Обновление списков пакетов..."
 for i in 1 2 3; do
   echo "Попытка $i из 3..."
@@ -64,19 +53,18 @@ for i in 1 2 3; do
     break
   fi
   if [ $i -lt 3 ]; then
-    echo "Ошибка обновления, ждем 10 секунд перед повторной попыткой..."
+    echo "Ошибка обновления, ждем 10 секунд..."
     sleep 10
   else
-    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось обновить списки пакетов после 3 попыток."
+    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось обновить списки пакетов."
     exit 1
   fi
 done
 
-# 2.5 Принудительное удаление dnsmasq
-echo "Принудительное удаление стандартного dnsmasq..."
+# 2.4 Принудительное удаление dnsmasq
 opkg remove dnsmasq >/dev/null 2>&1
 
-# 2.6 Установка основных пакетов с 3 попытками
+# 2.5 Установка основных пакетов с 3 попытками
 echo "Установка основных пакетов..."
 for i in 1 2 3; do
   echo "Попытка установки $i из 3..."
@@ -86,18 +74,18 @@ for i in 1 2 3; do
     break
   fi
   if [ $i -lt 3 ]; then
-    echo "Ошибка установки, ждем 10 секунд перед повторной попыткой..."
+    echo "Ошибка установки, ждем 10 секунд..."
     sleep 10
   else
-    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить пакеты после 3 попыток."
+    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить пакеты."
     exit 1
   fi
 done
-
 echo ">>> Установка пакетов завершена."
 echo ""
 
 # --- БЛОК 3: УСИЛЕНИЕ БЕЗОПАСНОСТИ ---
+# (Этот блок остается без изменений)
 echo ">>> Шаг 3: Усиление безопасности системы..."
 uci -q delete network.globals.ula_prefix
 for iface in lan wan; do uci -q set network.${iface}.ipv6='0'; done
@@ -141,10 +129,9 @@ echo ">>> Ссылка на подписку принята."
 echo ""
 
 # --- БЛОК 5: КОНФИГУРАЦИЯ PASSWALL ---
+# (Этот блок остается без изменений)
 echo ">>> Шаг 5: Применение вашей персональной конфигурации PassWall..."
 uci -q delete passwall
-
-# Глобальные настройки
 uci set passwall.global=global
 uci set passwall.global.enabled='0'
 uci set passwall.global.tcp_proxy_mode='disable'
@@ -158,14 +145,10 @@ uci set passwall.global.filter_proxy_ipv6='0'
 uci set passwall.global.chn_list='proxy'
 uci set passwall.global.localhost_proxy='1'
 uci set passwall.global.client_proxy='1'
-
-# Настройки подписки
 uci set passwall.global_subscribe=global_subscribe
 uci set passwall.global_subscribe.filter_keyword_mode='1'
 uci -q delete passwall.global_subscribe.filter_discard_list
 uci add_list passwall.global_subscribe.filter_keep_list='Router_'
-
-# Настройки правил
 uci set passwall.global_rules=global_rules
 uci -q delete passwall.global_rules.gfwlist_url
 uci -q delete passwall.global_rules.chnroute_url
@@ -176,35 +159,28 @@ uci add_list passwall.global_rules.chnlist_url='https://raw.githubusercontent.co
 uci add_list passwall.global_rules.chnlist_url='https://storage.yandexcloud.net/domenchik/domenchik.lst'
 uci add_list passwall.global_rules.chnlist_url='https://raw.githubusercontent.com/UnionUnllimited/domensrouter/refs/heads/main/domenchik.lst'
 uci set passwall.global_rules.chnlist_update='1'
-
-# Добавляем подписку
 SUB_ID=$(uci add passwall subscribe_list)
 uci set passwall.${SUB_ID}.remark='AtlantaRouter'
 uci set passwall.${SUB_ID}.url="${SUB_URL}"
 uci set passwall.${SUB_ID}.auto_update='1'
-
-# Создаем узел балансировки
 BALANCING_NODE_ID=$(uci add passwall nodes)
 uci set passwall.${BALANCING_NODE_ID}.remarks='AtlantaSwitch'
 uci set passwall.${BALANCING_NODE_ID}.type='Xray'
 uci set passwall.${BALANCING_NODE_ID}.protocol='_balancing'
 uci set passwall.${BALANCING_NODE_ID}.balancingStrategy='leastPing'
-
 echo ">>> Применение конфигурации PassWall завершено."
 echo ""
 
 # --- БЛОК 6: ОБНОВЛЕНИЕ, СБОРКА БАЛАНСИРОВЩИКА И ЗАПУСК ---
+# (Этот блок остается без изменений)
 echo ">>> Шаг 6: Сохранение, обновление подписки и финальная настройка..."
 uci commit passwall
 echo "Конфигурация сохранена."
-
 echo "Запуск обновления подписки... Это может занять некоторое время."
 /usr/share/passwall/app.sh "subscribe_update"
-
 echo "!!! ВАЖНО: Ждем 20 секунд, чтобы подписка успела полностью обновиться..."
 sleep 20
 echo "Пауза завершена."
-
 echo "Добавление узлов из подписки в балансировщик..."
 NODE_LIST=$(uci show passwall | grep ".group='AtlantaRouter'" | cut -d'.' -f2)
 if [ -n "$NODE_LIST" ]; then
@@ -217,19 +193,17 @@ if [ -n "$NODE_LIST" ]; then
 else
     echo "ПРЕДУПРЕЖДЕНИЕ: Узлы с группой 'AtlantaRouter' не найдены после обновления. Балансировщик будет пустым."
 fi
-
 uci set passwall.@global[0].tcp_node="${BALANCING_NODE_ID}"
 uci set passwall.@global[0].udp_node="${BALANCING_NODE_ID}"
 uci set passwall.@global[0].enabled='1'
 uci commit passwall
-
 /etc/init.d/passwall restart
 echo "Служба PassWall перезапущена."
 echo ""
 
 # --- БЛОК 7: УСТАНОВКА ПАТЧА И ОЧИСТКА КЭША ---
+# (Этот блок остается без изменений)
 echo ">>> Шаг 7: Установка патча и очистка кэша LuCI..."
-# (Ваш скрипт-патч)
 cat > /tmp/install.sh << 'FINALSCRIPT'
 #!/bin/sh
 echo "=========================================="
@@ -448,3 +422,5 @@ echo "Теперь в Balancing только группы!"
 FINALSCRIPT
 chmod +x /tmp/install.sh && /tmp/install.sh
 echo ">>> Установка патча завершена."
+echo ""
+echo "СКРИПТ ПОЛНОСТЬЮ ЗАВЕРШЕН."
