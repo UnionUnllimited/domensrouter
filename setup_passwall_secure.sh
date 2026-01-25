@@ -16,7 +16,7 @@ echo ">>> Шаг 1: Установка PassWall и необходимых зав
 wget -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
 opkg-key add /tmp/passwall.pub
 
-# 1.2. Безопасное добавление репозиториев (с проверкой на дубликаты)
+# 1.2. Безопасное добавление репозиториев
 DISTRIB_RELEASE=$(grep "DISTRIB_RELEASE" /etc/openwrt_release | cut -d "'" -f 2 | cut -d "." -f 1,2)
 DISTRIB_ARCH=$(grep "DISTRIB_ARCH" /etc/openwrt_release | cut -d "'" -f 2)
 LUCI_FEED_URL="src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-${DISTRIB_RELEASE}/${DISTRIB_ARCH}/passwall_luci"
@@ -24,39 +24,60 @@ PACKAGES_FEED_URL="src/gz passwall_packages https://master.dl.sourceforge.net/pr
 
 if ! grep -q "passwall_luci" /etc/opkg/customfeeds.conf; then
   echo $LUCI_FEED_URL >> /etc/opkg/customfeeds.conf
-  echo "Репозиторий passwall_luci добавлен."
 fi
 if ! grep -q "passwall_packages" /etc/opkg/customfeeds.conf; then
   echo $PACKAGES_FEED_URL >> /etc/opkg/customfeeds.conf
-  echo "Репозиторий passwall_packages добавлен."
 fi
 
-# 1.3. Обновление списка пакетов
-opkg update
-
-# 1.4. Принудительное удаление dnsmasq для избежания конфликта
-echo "Принудительное удаление стандартного dnsmasq..."
-opkg remove dnsmasq
-
-# 1.5. Установка PassWall и ключевых зависимостей
-echo "Установка основных пакетов..."
-opkg install luci-app-passwall dnsmasq-full xray-core chinadns-ng ipset ipt2socks iptables-mod-tproxy
-
-# 1.6. Проверка успешной установки
-if ! opkg list-installed | grep -q "luci-app-passwall"; then
-    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить luci-app-passwall. Проверьте лог выше на предмет ошибок скачивания или конфликтов. Прерывание скрипта."
+# 1.3. Обновление списка пакетов с 3 попытками
+echo "Обновление списков пакетов..."
+for i in 1 2 3; do
+  echo "Попытка $i из 3..."
+  rm -f /var/opkg-lists/*
+  opkg update
+  if [ $? -eq 0 ]; then
+    echo "Списки пакетов успешно обновлены."
+    break
+  fi
+  if [ $i -lt 3 ]; then
+    echo "Ошибка обновления, ждем 10 секунд перед повторной попыткой..."
+    sleep 10
+  else
+    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось обновить списки пакетов после 3 попыток."
     exit 1
-fi
+  fi
+done
+
+# 1.4. Принудительное удаление dnsmasq
+echo "Принудительное удаление стандартного dnsmasq..."
+opkg remove dnsmasq >/dev/null 2>&1
+
+# 1.5. Установка основных пакетов с 3 попытками
+echo "Установка основных пакетов..."
+for i in 1 2 3; do
+  echo "Попытка установки $i из 3..."
+  opkg install luci-app-passwall dnsmasq-full xray-core chinadns-ng ipset ipt2socks iptables-mod-tproxy
+  if [ $? -eq 0 ] && opkg list-installed | grep -q "luci-app-passwall"; then
+    echo "Основные пакеты успешно установлены."
+    break
+  fi
+  if [ $i -lt 3 ]; then
+    echo "Ошибка установки, ждем 10 секунд перед повторной попыткой..."
+    sleep 10
+  else
+    echo "КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить пакеты после 3 попыток."
+    exit 1
+  fi
+done
 
 echo ">>> Установка пакетов завершена."
 echo ""
 
 # --- БЛОК 2: УСИЛЕНИЕ БЕЗОПАСНОСТИ ---
 echo ">>> Шаг 2: Усиление безопасности системы..."
-# (Команды для отключения IPv6 и защиты от утечек)
 uci -q delete network.globals.ula_prefix
 for iface in lan wan; do
-    uci set network.${iface}.ipv6='0'
+    uci -q set network.${iface}.ipv6='0'
 done
 if uci -q get network.wan6 >/dev/null; then
     uci set network.wan6.proto='none'
