@@ -1,0 +1,2051 @@
+cat <<'EOF' > /tmp/install_atlanta_panel_v2.sh
+#!/bin/sh
+set -eu
+
+# ════════════════════════════════════════════════════════════════
+#  Atlanta Router — Installer v2
+#  Улучшения: прогресс установки, мобильное меню, статус WAN,
+#  индикаторы YT / TG / ВК / ИИ-сервисов
+# ════════════════════════════════════════════════════════════════
+
+# ── Цветовой вывод ──────────────────────────────────────────────
+C0='\033[0m'; CB='\033[1;36m'; CG='\033[1;32m'; CY='\033[1;33m'; CR='\033[1;31m'
+step(){ printf "${CB}━━━ %s ━━━${C0}\n" "$*"; }
+ok(){   printf "  ${CG}✔  %s${C0}\n" "$*"; }
+info(){ printf "  ${CY}ℹ  %s${C0}\n" "$*"; }
+
+printf '\n'
+printf "${CB}╔══════════════════════════════════════════╗${C0}\n"
+printf "${CB}║      🚀  Atlanta Router — Installer v2    ║${C0}\n"
+printf "${CB}╚══════════════════════════════════════════╝${C0}\n\n"
+
+CGI_DIR="/www/cgi-bin"
+PANEL="$CGI_DIR/panel"
+CONF="/etc/config/atl_panel"
+LAN_IP="192.168.14.1"
+LAN_MASK="255.255.255.0"
+WIFI_SSID_24="Atlanta 2.4Ghz"
+WIFI_SSID_5="Atlanta 5Ghz"
+WIFI_KEY="11111111"
+
+# ── [1/8] Директории ────────────────────────────────────────────
+step "[1/8] Подготовка окружения"
+mkdir -p "$CGI_DIR"
+mkdir -p /etc/config
+ok "Директории созданы"
+
+# ── [2/8] UCI-конфиг ────────────────────────────────────────────
+step "[2/8] Записываем UCI-конфигурацию"
+cat >"$CONF" <<'UCI'
+config atl_panel 'main'
+  option user 'admin'
+  option pass 'admin'
+  option upd_version_url 'https://raw.githubusercontent.com/UnionUnllimited/routeratl/refs/heads/main/version.txt'
+  option upd_script_url 'https://raw.githubusercontent.com/UnionUnllimited/routeratl/refs/heads/main/update.sh'
+  option YT_mode 'main'
+UCI
+ok "UCI-конфиг готов"
+
+# ── [3/8] CGI-скрипт панели ────────────────────────────────────
+step "[3/8] Записываем CGI-скрипт панели"
+info "Это самый большой шаг — немного подождите…"
+
+cat >"$PANEL" <<'PANELFILE'
+#!/bin/sh
+set -eu
+
+LINK_SUB="https://t.me/AtlantaVPN_bot"
+LINK_SUPPORT="https://t.me/AtlantaVPNSUPPORT_bot"
+
+CONF="/etc/config/atl_panel"
+LOG="/tmp/atl_panel_passwall_update.log"
+UPD_LOG="/tmp/atl_panel_update.log"
+UPD_STATE="/etc/atl_panel_update_state"
+LOCK="/tmp/atl_panel_update.lock"
+
+touch "$LOG" "$UPD_LOG" 2>/dev/null || true
+chmod 666 "$LOG" "$UPD_LOG" 2>/dev/null || true
+
+[ -f "$CONF" ] || cat >"$CONF" <<'UCI'
+config atl_panel 'main'
+  option user 'admin'
+  option pass 'admin'
+  option upd_version_url 'https://raw.githubusercontent.com/UnionUnllimited/routeratl/refs/heads/main/version.txt'
+  option upd_script_url 'https://raw.githubusercontent.com/UnionUnllimited/routeratl/refs/heads/main/update.sh'
+  option YT_mode 'main'
+UCI
+
+# Конфиг хранится в /etc/config/atl_panel
+# Читаем/пишем напрямую в файл — без зависимости от UCI кеша
+ATL_CFG="/etc/config/atl_panel"
+
+getcfg(){
+  _k="$1"
+  # Читаем из файла напрямую (игнорируем UCI in-memory cache)
+  if [ -f "$ATL_CFG" ]; then
+    grep "^[[:space:]]*option ${_k} " "$ATL_CFG" \
+      | sed "s|^[[:space:]]*option ${_k} '||;s|'[[:space:]]*$||" \
+      | head -1
+  else
+    uci -q get atl_panel.main."${_k}" 2>/dev/null || true
+  fi
+}
+
+setcfg(){
+  _k="$1"; _v="$2"
+  # Обновляем файл напрямую через sed
+  if [ -f "$ATL_CFG" ]; then
+    _tmp="${ATL_CFG}.tmp.$$"
+    sed "s|^[[:space:]]*option ${_k} .*|  option ${_k} '${_v}'|" "$ATL_CFG" > "$_tmp" \
+      && mv "$_tmp" "$ATL_CFG" \
+      || rm -f "$_tmp"
+  fi
+  # UCI для совместимости
+  uci -q set atl_panel.main."${_k}"="${_v}" 2>/dev/null || true
+}
+
+commitcfg(){
+  uci -q commit atl_panel 2>/dev/null || true
+}
+
+html_escape(){ sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
+strip_newlines(){ tr -d '\r\n'; }
+trim_spaces(){ awk '{gsub(/^[ \t]+|[ \t]+$/,""); print}'; }
+
+is_ascii(){ printf "%s" "$1" | LC_ALL=C grep -q '^[ -~]*$'; }
+is_ascii_nospace(){ printf "%s" "$1" | LC_ALL=C grep -q '^[!-~]*$'; }
+len_ge_5(){ [ "$(printf "%s" "$1" | wc -c | tr -d ' ')" -ge 5 ]; }
+len_ge_8(){ [ "$(printf "%s" "$1" | wc -c | tr -d ' ')" -ge 8 ]; }
+
+is_ipv4(){
+  printf "%s" "$1" | grep -Eq '^((25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9])$'
+}
+
+urldecode(){
+  sed 's/+/ /g' | awk '
+    BEGIN{ ORS=""; }
+    {
+      while (match($0, /%[0-9A-Fa-f][0-9A-Fa-f]/)) {
+        hex = substr($0, RSTART+1, 2)
+        pre = substr($0, 1, RSTART-1)
+        post = substr($0, RSTART+3)
+        printf "%s", pre
+        printf "%c", strtonum("0x" hex)
+        $0 = post
+      }
+      print $0
+    }'
+}
+
+qenc(){
+  printf "%s" "$1" | sed \
+    -e 's/%/%25/g' -e 's/&/%26/g' -e 's/?/%3F/g' \
+    -e 's/=/%3D/g' -e 's/+/%2B/g' -e 's/ /%20/g'
+}
+
+redir(){
+  msg="$(qenc "${1:-}")"
+  err="$(qenc "${2:-}")"
+  upd="$(qenc "${3:-}")"
+  echo "Status: 303 See Other"
+  echo "Location: /cgi-bin/panel?m=$msg&e=$err&u=$upd"
+  echo ""
+  exit 0
+}
+
+fetch(){
+  url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 15 --max-time 120 "$url"
+  else
+    wget -qO- --timeout=120 "$url"
+  fi
+}
+
+apply_update_script(){
+  script_url="$1"
+  tmp="/tmp/atl_update.sh"
+  echo "=== $(date) manual update start ===" >> "$UPD_LOG"
+  if fetch "$script_url" > "$tmp" 2>>"$UPD_LOG"; then
+    chmod +x "$tmp"
+    sh "$tmp" >> "$UPD_LOG" 2>&1 || true
+  fi
+  echo "=== $(date) manual update end ===" >> "$UPD_LOG"
+}
+
+detect_wan_iface(){
+  if uci -q show firewall >/dev/null 2>&1; then
+    IFACE="$(uci -q show firewall | awk -F"'" '
+      BEGIN{z=0}
+      /^config zone/{z=0}
+      /option name '\''wan'\''/{z=1}
+      z==1 && /list network/{print $2; exit}
+    ')"
+    [ -n "${IFACE:-}" ] && { echo "$IFACE"; return 0; }
+  fi
+  echo "wan"
+}
+
+ensure_wan_zone_has_iface(){
+  _iface="${1:-wan}"
+  idx="$(uci -q show firewall | awk '
+    $1=="config" && $2=="zone" {i++}
+    $1=="option" && $2=="name" && $3=="'\''wan'\''" {print i-1; exit}
+  ' 2>/dev/null || true)"
+  [ -n "${idx:-}" ] || return 0
+  if uci -q show firewall.@zone["$idx"].network 2>/dev/null | grep -qw "$_iface"; then
+    return 0
+  fi
+  uci -q add_list firewall.@zone["$idx"].network="$_iface" || true
+  uci -q commit firewall >/dev/null 2>&1 || true
+}
+
+pw_exists(){ [ -f /etc/config/passwall ]; }
+
+normalize_server_label(){
+  s="$1"
+  s="${s#Router_}"
+  s="${s#router_}"
+  printf "%s" "$s"
+}
+
+pw_current_node(){
+  uci -q get passwall.@global[0].tcp_node 2>/dev/null || true
+}
+
+pw_node_label(){
+  node="$1"
+  [ -n "$node" ] || return 0
+  label="$(uci -q get passwall."$node".remarks 2>/dev/null || true)"
+  [ -n "$label" ] || label="$(uci -q get passwall."$node".address 2>/dev/null || true)"
+  [ -n "$label" ] || label="$node"
+  case "$label" in
+    AtlantaSwitch|ATLANTASWITCH|atlantaswitch) label="Авто (балансер)" ;;
+  esac
+  case "$node" in
+    *AtlantaSwitch*|*ATLANTASWITCH*|*atlantaswitch*) label="Авто (балансер)" ;;
+  esac
+  normalize_server_label "$label"
+}
+
+pw_nodes_list(){
+  uci -q show passwall 2>/dev/null | awk -F"[.=']" '
+    /\.remarks=/{
+      sec=$2; val=$0;
+      sub(/^.*='\''/,"",val); sub(/'\''$/,"",val);
+      rem[sec]=val;
+    }
+    /\.address=/{
+      sec=$2; val=$0;
+      sub(/^.*='\''/,"",val); sub(/'\''$/,"",val);
+      if(!(sec in rem) || rem[sec]=="") rem[sec]=val;
+    }
+    END{
+      for (k in rem) {
+        if (k ~ /^@global/ || k ~ /^@acl/ || k ~ /^@rules/ || k ~ /^@balancing/ || k ~ /^@balancer/) continue;
+        print k "\t" rem[k];
+      }
+    }' | sort
+}
+
+pw_apply_node(){
+  node="$1"
+  [ -n "$node" ] || return 1
+  uci -q set passwall.@global[0].tcp_node="$node" 2>/dev/null || true
+  uci -q set passwall.@global[0].udp_node="$node" 2>/dev/null || true
+  uci -q commit passwall >/dev/null 2>&1 || true
+  /etc/init.d/passwall restart >/dev/null 2>&1 || true
+}
+
+get_direct_file(){
+  for f in \
+    /usr/share/passwall/rules/direct_host \
+    /etc/passwall/direct_host \
+    /usr/share/passwall/rules/direct_host_v2 \
+    /tmp/dnsmasq.d/direct_host
+  do
+    [ -f "$f" ] && { echo "$f"; return 0; }
+  done
+  mkdir -p /usr/share/passwall/rules 2>/dev/null || true
+  touch /usr/share/passwall/rules/direct_host 2>/dev/null || true
+  echo /usr/share/passwall/rules/direct_host
+}
+
+yt_domains(){
+  cat <<DOMAINS
+YT.com
+www.YT.com
+m.YT.com
+youtu.be
+YTi.googleapis.com
+YT.googleapis.com
+googlevideo.com
+ytimg.com
+YT-nocookie.com
+yt3.ggpht.com
+i.ytimg.com
+DOMAINS
+}
+
+direct_add_YT(){
+  f="$(get_direct_file)"
+  tmp="/tmp/atl_direct_YT.$$"
+  touch "$f"
+  cp "$f" "$tmp" 2>/dev/null || true
+  yt_domains | while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    grep -qxF "$d" "$tmp" 2>/dev/null || echo "$d" >> "$tmp"
+  done
+  awk 'NF && !seen[$0]++' "$tmp" > "$f"
+  rm -f "$tmp"
+}
+
+direct_remove_YT(){
+  f="$(get_direct_file)"
+  tmp="/tmp/atl_direct_YT.$$"
+  touch "$f"
+  cp "$f" "$tmp" 2>/dev/null || true
+  grep -vxF -f /dev/stdin "$tmp" > "$f" <<DOMAINS
+YT.com
+www.YT.com
+m.YT.com
+youtu.be
+YTi.googleapis.com
+YT.googleapis.com
+googlevideo.com
+ytimg.com
+YT-nocookie.com
+yt3.ggpht.com
+i.ytimg.com
+DOMAINS
+  rm -f "$tmp"
+}
+
+zapret_start(){
+  [ -x /etc/init.d/zapret ] && {
+    /etc/init.d/zapret enable >/dev/null 2>&1 || true
+    /etc/init.d/zapret restart >/dev/null 2>&1 || /etc/init.d/zapret start >/dev/null 2>&1 || true
+    return 0
+  }
+  pgrep -f nfqws >/dev/null 2>&1 && return 0
+  return 0
+}
+
+zapret_stop(){
+  [ -x /etc/init.d/zapret ] && {
+    /etc/init.d/zapret stop >/dev/null 2>&1 || true
+    /etc/init.d/zapret disable >/dev/null 2>&1 || true
+  }
+  killall nfqws 2>/dev/null || true
+}
+
+bypass_state(){
+  pw=0; zp=0
+  [ -x /etc/init.d/passwall ] && /etc/init.d/passwall enabled >/dev/null 2>&1 && pw=1 || true
+  pgrep -f '[n]fqws' >/dev/null 2>&1 && zp=1 || true
+  if [ "$pw" = "1" ] || [ "$zp" = "1" ]; then echo "on"; else echo "off"; fi
+}
+
+passwall_reload_soft(){
+  [ -x /etc/init.d/passwall ] && /etc/init.d/passwall reload >/dev/null 2>&1 || true
+  [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+}
+
+main_mode_start(){
+  direct_add_YT; zapret_start
+  setcfg YT_mode main; commitcfg; passwall_reload_soft
+}
+
+backup_mode_start(){
+  direct_remove_YT; zapret_stop
+  setcfg YT_mode backup; commitcfg; passwall_reload_soft
+}
+
+bypass_enable_all(){
+  [ -x /etc/init.d/passwall ] && {
+    /etc/init.d/passwall enable >/dev/null 2>&1 || true
+    /etc/init.d/passwall start >/dev/null 2>&1 || /etc/init.d/passwall restart >/dev/null 2>&1 || true
+  }
+  zapret_start; passwall_reload_soft
+}
+
+bypass_disable_all(){
+  [ -x /etc/init.d/passwall ] && {
+    /etc/init.d/passwall stop >/dev/null 2>&1 || true
+    /etc/init.d/passwall disable >/dev/null 2>&1 || true
+  }
+  zapret_stop
+}
+
+apply_panel_auth(){
+  nu="$1"; np="$2"
+  # setcfg теперь пишет атомарно в файл и в UCI
+  setcfg user "$nu"
+  setcfg pass "$np"
+  commitcfg
+}
+
+# ─── Параллельная проверка связи (для api_status) ──────────────
+# Пинг с замером задержки (ms)
+ping_ms(){
+  _h="$1"
+  _r="$(ping -c3 -W2 -q "$_h" 2>/dev/null | awk -F'/' '/rtt/{printf "%d", $5+0.5}')"
+  [ -n "${_r:-}" ] && echo "$_r" || echo ""
+}
+
+run_ping_checks(){
+  WAN_IF_CHK="$(detect_wan_iface)"
+  ( ping -c1 -W2 -q 8.8.8.8          >/dev/null 2>&1 && echo 1 || echo 0 ) >/tmp/atl_ps_i &
+  ( ping -c1 -W2 -q youtube.com       >/dev/null 2>&1 && echo 1 || echo 0 ) >/tmp/atl_ps_y &
+  ( ping -c1 -W2 -q api.telegram.org  >/dev/null 2>&1 && echo 1 || echo 0 ) >/tmp/atl_ps_t &
+  ( ping -c1 -W2 -q vk.com            >/dev/null 2>&1 && echo 1 || echo 0 ) >/tmp/atl_ps_v &
+  ( ping -c1 -W2 -q www.instagram.com >/dev/null 2>&1 && echo 1 || echo 0 ) >/tmp/atl_ps_ig &
+  ( ping -c1 -W2 -q api.openai.com    >/dev/null 2>&1 && echo 1 || echo 0 ) >/tmp/atl_ps_ai &
+  wait
+  S_I="$(cat /tmp/atl_ps_i  2>/dev/null || echo 0)"
+  S_Y="$(cat /tmp/atl_ps_y  2>/dev/null || echo 0)"
+  S_T="$(cat /tmp/atl_ps_t  2>/dev/null || echo 0)"
+  S_V="$(cat /tmp/atl_ps_v  2>/dev/null || echo 0)"
+  S_IG="$(cat /tmp/atl_ps_ig 2>/dev/null || echo 0)"
+  S_AI="$(cat /tmp/atl_ps_ai 2>/dev/null || echo 0)"
+  rm -f /tmp/atl_ps_i /tmp/atl_ps_y /tmp/atl_ps_t /tmp/atl_ps_v /tmp/atl_ps_ig /tmp/atl_ps_ai 2>/dev/null || true
+  WAN_IP_CHK="$(ip addr show "$WAN_IF_CHK" 2>/dev/null | awk '/inet /{sub(/\/[0-9]+/,"",$2); print $2; exit}')"
+  if [ -z "${WAN_IP_CHK:-}" ]; then
+    for _pif in ppp0 pppoe-wan pppoe-"$WAN_IF_CHK" l2tp0 pptp0; do
+      WAN_IP_CHK="$(ip addr show "$_pif" 2>/dev/null | awk '/inet /{sub(/\/[0-9]+/,"",$2); print $2; exit}')"
+      [ -n "${WAN_IP_CHK:-}" ] && break
+    done
+  fi
+  if [ -z "${WAN_IP_CHK:-}" ]; then
+    _def_if="$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')"
+    [ -n "${_def_if:-}" ] && WAN_IP_CHK="$(ip addr show "$_def_if" 2>/dev/null | awk '/inet /{sub(/\/[0-9]+/,"",$2); print $2; exit}')"
+  fi
+  WAN_GW_CHK="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}' || true)"
+  BYP_CHK="$(bypass_state)"
+  b(){ [ "$1" = "1" ] && echo "true" || echo "false"; }
+  printf '{"wan_ip":"%s","wan_gw":"%s","bypass":"%s","inet":%s,"YT":%s,"TG":%s,"vk":%s,"instagram":%s,"ai":%s}' \
+    "${WAN_IP_CHK:-}" "${WAN_GW_CHK:-}" "$BYP_CHK" \
+    "$(b "$S_I")" "$(b "$S_Y")" "$(b "$S_T")" "$(b "$S_V")" "$(b "$S_IG")" "$(b "$S_AI")"
+}
+
+MAC="$(cat /sys/class/net/br-lan/address 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo N/A)"
+
+QS="${QUERY_STRING:-}"
+GET_M="$(printf "%s" "$QS" | tr '&' '\n' | sed -n 's/^m=//p' | head -n1 | urldecode 2>/dev/null || true)"
+GET_E="$(printf "%s" "$QS" | tr '&' '\n' | sed -n 's/^e=//p' | head -n1 | urldecode 2>/dev/null || true)"
+GET_U="$(printf "%s" "$QS" | tr '&' '\n' | sed -n 's/^u=//p' | head -n1 | urldecode 2>/dev/null || true)"
+GET_ACT="$(printf "%s" "$QS" | tr '&' '\n' | sed -n 's/^action=//p' | head -n1 | urldecode 2>/dev/null || true)"
+
+MSG="${GET_M:-}"; ERR="${GET_E:-}"; UPD_STATUS=""; UPD_COLOR=""
+if [ -n "${GET_U:-}" ]; then
+  case "$GET_U" in
+    ok)  UPD_STATUS="✅ Обновление выполнено."; UPD_COLOR="ok" ;;
+    bad) UPD_STATUS="❌ Ошибка обновления."; UPD_COLOR="bad" ;;
+  esac
+fi
+
+FORM_action="" FORM_user="" FORM_pass="" FORM_new_user="" FORM_new_pass=""
+FORM_wan_proto="" FORM_pppoe_user="" FORM_pppoe_pass=""
+FORM_l2tp_server="" FORM_l2tp_user="" FORM_l2tp_pass=""
+FORM_pptp_server="" FORM_pptp_user="" FORM_pptp_pass=""
+FORM_static_ip="" FORM_static_mask="" FORM_static_gw="" FORM_static_dns1="" FORM_static_dns2=""
+FORM_ssid_24="" FORM_key_24="" FORM_ssid_5="" FORM_key_5=""
+FORM_pw_node="" FORM_yt_mode=""
+
+if [ "${REQUEST_METHOD:-}" = "POST" ]; then
+  len="${CONTENT_LENGTH:-0}"
+  if [ "$len" -gt 0 ]; then
+    if read -r -n "$len" POST_DATA 2>/dev/null; then :; else POST_DATA="$(dd bs=1 count="$len" 2>/dev/null)"; fi
+    POST_DATA="$(printf "%s" "$POST_DATA" | tr '\r\n' '  ')"
+    OLDIFS="$IFS"; IFS="&"; set -- $POST_DATA; IFS="$OLDIFS"
+    for pair in "$@"; do
+      k="${pair%%=*}"; v="${pair#*=}"
+      [ -n "$k" ] || continue
+      v_dec="$(printf "%s" "${v:-}" | urldecode | strip_newlines)"
+      case "$k" in
+        action) FORM_action="$v_dec" ;;
+        user) FORM_user="$v_dec" ;;
+        pass) FORM_pass="$v_dec" ;;
+        new_user) FORM_new_user="$v_dec" ;;
+        new_pass) FORM_new_pass="$v_dec" ;;
+        wan_proto) FORM_wan_proto="$v_dec" ;;
+        pppoe_user) FORM_pppoe_user="$v_dec" ;;
+        pppoe_pass) FORM_pppoe_pass="$v_dec" ;;
+        l2tp_server) FORM_l2tp_server="$v_dec" ;;
+        l2tp_user) FORM_l2tp_user="$v_dec" ;;
+        l2tp_pass) FORM_l2tp_pass="$v_dec" ;;
+        pptp_server) FORM_pptp_server="$v_dec" ;;
+        pptp_user) FORM_pptp_user="$v_dec" ;;
+        pptp_pass) FORM_pptp_pass="$v_dec" ;;
+        static_ip) FORM_static_ip="$v_dec" ;;
+        static_mask) FORM_static_mask="$v_dec" ;;
+        static_gw) FORM_static_gw="$v_dec" ;;
+        static_dns1) FORM_static_dns1="$v_dec" ;;
+        static_dns2) FORM_static_dns2="$v_dec" ;;
+        ssid_24) FORM_ssid_24="$v_dec" ;;
+        key_24) FORM_key_24="$v_dec" ;;
+        ssid_5) FORM_ssid_5="$v_dec" ;;
+        key_5) FORM_key_5="$v_dec" ;;
+        pw_node) FORM_pw_node="$v_dec" ;;
+        yt_mode) FORM_yt_mode="$v_dec" ;;
+      esac
+    done
+  fi
+fi
+
+need_auth=1
+
+if [ "${FORM_action:-}" = "login" ]; then
+  CUR_USER_CFG="$(getcfg user)"; CUR_PASS_CFG="$(getcfg pass)"
+  u_in="$(printf "%s" "$FORM_user" | trim_spaces)"
+  p_in="$(printf "%s" "$FORM_pass" | strip_newlines)"
+  if [ "$u_in" = "$CUR_USER_CFG" ] && [ "$p_in" = "$CUR_PASS_CFG" ]; then
+    sid="$(date +%s)$$"
+    echo "$sid" > /tmp/atl_panel_sid 2>/dev/null || true
+    chmod 600 /tmp/atl_panel_sid 2>/dev/null || true
+    echo "Status: 303 See Other"
+    echo "Set-Cookie: ATLSESS=$sid; Path=/; HttpOnly"
+    echo "Location: /cgi-bin/panel"
+    echo ""; exit 0
+  else
+    ERR="Неверный логин или пароль."
+  fi
+fi
+
+COOKIE="${HTTP_COOKIE:-}"
+SID_COOKIE="$(printf "%s" "$COOKIE" | tr ';' '\n' | sed -n 's/^[[:space:]]*ATLSESS=//p' | head -n1 | strip_newlines)"
+SID_FILE="$(cat /tmp/atl_panel_sid 2>/dev/null || true)"
+[ -n "$SID_COOKIE" ] && [ -n "$SID_FILE" ] && [ "$SID_COOKIE" = "$SID_FILE" ] && need_auth=0
+
+if [ "${FORM_action:-}" = "logout" ]; then
+  rm -f /tmp/atl_panel_sid 2>/dev/null || true
+  echo "Status: 303 See Other"
+  echo "Set-Cookie: ATLSESS=deleted; Path=/; Max-Age=0"
+  echo "Location: /cgi-bin/panel"
+  echo ""; exit 0
+fi
+
+if [ "$need_auth" = "1" ]; then
+  echo "Content-type: text/html; charset=utf-8"; echo ""
+  ES_ERR="$(printf "%s" "${ERR:-}" | html_escape)"
+  ES_MSG="$(printf "%s" "${MSG:-}" | html_escape)"
+  ES_MAC="$(printf "%s" "$MAC" | html_escape)"
+  cat <<HTML
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Atlanta Router • Вход</title>
+<style>
+:root{--bg:#05070d;--txt:#eaf3ff;--mut:rgba(234,243,255,.62);--acc:#2fe6ff;--acc2:#2a7bff;--acc3:#7b5cff;--bad:#ff6b6b;--ok:#57f287}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 700px at 18% 12%,rgba(0,176,255,.22),transparent 60%),radial-gradient(1000px 520px at 85% 18%,rgba(96,71,255,.18),transparent 58%),linear-gradient(180deg,#05070d,#070b14);color:var(--txt);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto}
+.wrap{max-width:520px;margin:0 auto;padding:26px}
+.card{margin-top:42px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.03));border:1px solid rgba(255,255,255,.10);border-radius:18px;padding:16px;box-shadow:0 20px 60px rgba(0,0,0,.45);animation:fadeUp .4s ease both}
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+h1{margin:0 0 8px;font-size:18px;text-align:center}
+.sub{color:var(--mut);font-size:12px;margin-bottom:12px;text-align:center}
+label{display:block;color:var(--mut);font-size:12px;margin:10px 0 6px}
+input{width:100%;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.12);color:var(--txt);padding:12px;border-radius:14px;min-height:44px;font-size:16px;transition:border-color .2s,box-shadow .2s}
+input:focus{outline:none;border-color:rgba(47,230,255,.55);box-shadow:0 0 0 3px rgba(47,230,255,.12)}
+.btn{border:0;border-radius:14px;padding:12px 14px;font-weight:950;color:#041018;background:linear-gradient(90deg,var(--acc),var(--acc2),var(--acc3));cursor:pointer;min-height:44px;width:100%;margin-top:12px;transition:opacity .15s,transform .1s}
+.btn:active{transform:scale(.97)}
+.btn.secondary{background:rgba(255,255,255,.08);color:var(--txt);border:1px solid rgba(255,255,255,.12)}
+.err{margin-top:12px;padding:10px 12px;border-radius:14px;border:1px solid rgba(255,107,107,.25);background:rgba(255,107,107,.08);animation:fadeUp .3s ease both}
+.msg{margin-top:12px;padding:10px 12px;border-radius:14px;border:1px solid rgba(87,242,135,.25);background:rgba(87,242,135,.08)}
+.hint{margin-top:10px;color:var(--mut);font-size:12px;text-align:center}
+.copywrap{display:grid;grid-template-columns:auto auto auto;gap:10px;align-items:center;justify-content:center;margin-top:10px}
+.copyid{font-weight:900;letter-spacing:.3px}
+.copybtn{border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:var(--txt);border-radius:12px;padding:8px 10px;cursor:pointer;min-height:38px}
+.toast{display:inline-block;margin-left:6px;color:var(--ok);font-weight:900;opacity:0;transition:opacity .2s}
+.toast.on{opacity:1}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.row .btn{width:auto;flex:1;display:flex;align-items:center;justify-content:center;text-align:center}
+@media(max-width:900px),(hover:none) and (pointer:coarse){input,select,textarea{font-size:16px !important}}
+</style>
+<script>
+async function copyText(id){
+  var el=document.getElementById(id);
+  var t=el?el.textContent.trim():"";
+  if(!t)return;
+  try{await navigator.clipboard.writeText(t);}
+  catch(e){var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}
+  var toast=document.getElementById('copied');
+  if(toast){toast.classList.add('on');setTimeout(function(){toast.classList.remove('on');},1200);}
+}
+</script>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>🛡 Atlanta Router</h1>
+    <div class="sub">Введите логин и пароль для входа в панель управления.</div>
+    <div class="copywrap">
+      <span style="color:var(--mut);font-size:12px">MAC</span>
+      <span id="mac" class="copyid">${ES_MAC}</span>
+      <button class="copybtn" type="button" onclick="copyText('mac')">📋 Копировать</button>
+      <span id="copied" class="toast">✅</span>
+    </div>
+    ${MSG:+<div class="msg">✅ ${ES_MSG}</div>}
+    ${ERR:+<div class="err">❌ ${ES_ERR}</div>}
+    <form method="POST" action="/cgi-bin/panel">
+      <input type="hidden" name="action" value="login">
+      <label>Логин</label>
+      <input name="user" autocomplete="username">
+      <label>Пароль</label>
+      <input name="pass" type="password" autocomplete="current-password">
+      <button class="btn" type="submit">Войти</button>
+    </form>
+    <div class="row">
+      <a class="btn secondary" href="${LINK_SUPPORT}" target="_blank" rel="noopener">🎧 Поддержка</a>
+      <a class="btn secondary" href="${LINK_SUB}" target="_blank" rel="noopener">💎 Подписка</a>
+    </div>
+    <div class="hint">По умолчанию: <b>admin/admin</b></div>
+  </div>
+</div>
+</body>
+</html>
+HTML
+  exit 0
+fi
+
+# ─── API: статус сети ──────────────────────────────────────────
+if [ "${GET_ACT:-}" = "api_status" ]; then
+  echo "Content-type: application/json; charset=utf-8"
+  echo "Cache-Control: no-store, no-cache"
+  echo ""
+  run_ping_checks
+  exit 0
+fi
+
+# ─── API: список устройств ─────────────────────────────────────
+if [ "${GET_ACT:-}" = "api_devices" ]; then
+  echo "Content-type: application/json; charset=utf-8"
+  echo "Cache-Control: no-store, no-cache"
+  echo ""
+  # Читаем DHCP leases: ts MAC IP hostname
+  TMP_DEV="/tmp/atl_dev.$$"
+  printf '{"devices":['  > "$TMP_DEV"
+  FIRST=1
+  if [ -f /tmp/dhcp.leases ]; then
+    while IFS=' ' read -r ts mac ip name _rest; do
+      [ -n "$ip" ] || continue
+      [ "$mac" = "*" ] && continue
+      # Проверяем активность через ARP
+      ACTIVE="false"
+      grep -qi "$ip " /proc/net/arp 2>/dev/null && ACTIVE="true"
+      [ "$FIRST" = "1" ] && FIRST=0 || printf ',' >> "$TMP_DEV"
+      name="${name:-Unknown}"
+      printf '{"ip":"%s","mac":"%s","name":"%s","active":%s}'         "$ip" "$mac" "$name" "$ACTIVE" >> "$TMP_DEV"
+    done < /tmp/dhcp.leases
+  fi
+  # Добавляем из ARP то, чего нет в leases
+  if [ -f /proc/net/arp ]; then
+    awk 'NR>1 && $4!="00:00:00:00:00:00" && $3=="0x2" {print $1,$4}' /proc/net/arp |     while IFS=' ' read -r ip mac; do
+      grep -q "$mac" /tmp/dhcp.leases 2>/dev/null && continue
+      [ "$FIRST" = "1" ] && FIRST=0 || printf ',' >> "$TMP_DEV"
+      printf '{"ip":"%s","mac":"%s","name":"Unknown","active":true}' "$ip" "$mac" >> "$TMP_DEV"
+    done
+  fi
+  printf ']}' >> "$TMP_DEV"
+  cat "$TMP_DEV"
+  rm -f "$TMP_DEV"
+  exit 0
+fi
+
+# ─── API: статистика трафика ────────────────────────────────────
+if [ "${GET_ACT:-}" = "api_stats" ]; then
+  echo "Content-type: application/json; charset=utf-8"
+  echo "Cache-Control: no-store, no-cache"
+  echo ""
+  # WAN интерфейс — ищем активный
+  WIF="$(detect_wan_iface)"
+  for _if in ppp0 pppoe-wan "$WIF" eth0 eth1; do
+    [ -f "/sys/class/net/$_if/statistics/rx_bytes" ] && { WIF="$_if"; break; }
+  done
+  RX=0; TX=0
+  [ -f "/sys/class/net/$WIF/statistics/rx_bytes" ] && RX="$(cat /sys/class/net/$WIF/statistics/rx_bytes 2>/dev/null || echo 0)"
+  [ -f "/sys/class/net/$WIF/statistics/tx_bytes" ] && TX="$(cat /sys/class/net/$WIF/statistics/tx_bytes 2>/dev/null || echo 0)"
+  # Активные соединения
+  CONNS=0
+  if [ -f /proc/net/nf_conntrack ]; then
+    CONNS="$(wc -l < /proc/net/nf_conntrack 2>/dev/null || echo 0)"
+  elif command -v conntrack >/dev/null 2>&1; then
+    CONNS="$(conntrack -L 2>/dev/null | wc -l || echo 0)"
+  fi
+  printf '{"iface":"%s","rx_bytes":%s,"tx_bytes":%s,"connections":%s}'     "$WIF" "$RX" "$TX" "$CONNS"
+  exit 0
+fi
+
+
+
+# ─── POST-действия ─────────────────────────────────────────────
+case "${FORM_action:-}" in
+  change_auth)
+    nu="$(printf "%s" "${FORM_new_user:-}" | strip_newlines | trim_spaces)"
+    np="$(printf "%s" "${FORM_new_pass:-}" | strip_newlines)"
+    # Оба поля пустые — нечего сохранять
+    [ -z "$nu" ] && [ -z "$np" ] && redir "" "Введите новый логин и пароль." ""
+    # Валидация логина (если указан)
+    if [ -n "$nu" ]; then
+      is_ascii_nospace "$nu" || redir "" "Логин: только латинские буквы и цифры, без пробелов." ""
+      len_ge_5 "$nu" || redir "" "Логин: минимум 5 символов." ""
+    else
+      nu="$(getcfg user)"
+    fi
+    # Валидация пароля (если указан)
+    if [ -n "$np" ]; then
+      len_ge_8 "$np" || redir "" "Пароль: минимум 8 символов." ""
+      is_ascii_nospace "$np" || redir "" "Пароль: только латинские буквы и цифры, без пробелов." ""
+    else
+      np="$(getcfg pass)"
+    fi
+    apply_panel_auth "$nu" "$np"
+    rm -f /tmp/atl_panel_sid 2>/dev/null || true
+    echo "Status: 303 See Other"
+    echo "Set-Cookie: ATLSESS=deleted; Path=/; Max-Age=0"
+    echo "Location: /cgi-bin/panel?m=$(qenc "Доступ сохранён. Войдите заново.")"
+    echo ""; exit 0
+    ;;
+  reboot)
+    echo "Content-type: text/html; charset=utf-8"; echo ""
+    cat <<'REBOOTPAGE'
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Перезагрузка — Atlanta Router</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  min-height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  background:#000;color:#fff;
+  font:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;
+  text-align:center;padding:24px;
+  background:radial-gradient(ellipse 120% 80% at 50% 0%,rgba(11,179,255,.12),transparent 60%),#000;
+}
+.icon{font-size:56px;margin-bottom:20px;animation:spin 2s linear infinite}
+@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+h1{font-size:22px;font-weight:700;margin-bottom:8px}
+.sub{color:rgba(255,255,255,.5);font-size:14px;margin-bottom:32px}
+.countdown{
+  font-size:52px;font-weight:800;
+  background:linear-gradient(135deg,#0bb3ff,#0078f0);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+  min-width:80px;display:inline-block;
+}
+.bar-wrap{width:min(320px,90vw);height:4px;background:rgba(255,255,255,.1);border-radius:99px;margin:20px auto 0;overflow:hidden}
+.bar{height:100%;background:linear-gradient(90deg,#0bb3ff,#0078f0);border-radius:99px;width:100%;transform-origin:left;transition:transform .5s linear}
+.status{margin-top:24px;font-size:13px;color:rgba(255,255,255,.45);min-height:20px}
+</style>
+</head>
+<body>
+<div class="icon">⚡</div>
+<h1>Роутер перезагружается</h1>
+<p class="sub">Страница обновится автоматически</p>
+<div class="countdown" id="cnt">30</div>
+<div class="bar-wrap"><div class="bar" id="bar"></div></div>
+<p class="status" id="st">Ожидаем перезагрузку…</p>
+<script>
+var TOTAL=30,left=TOTAL;
+var cnt=document.getElementById('cnt');
+var bar=document.getElementById('bar');
+var st=document.getElementById('st');
+function tick(){
+  left--;cnt.textContent=left;
+  bar.style.transform='scaleX('+( left/TOTAL )+')';
+  if(left<=0){
+    st.textContent='Проверяем доступность…';
+    tryReconnect();return;
+  }
+  if(left<=10)st.textContent='Почти готово…';
+  setTimeout(tick,1000);
+}
+function tryReconnect(){
+  fetch(location.href.split('/cgi-bin')[0]+'/',{mode:'no-cors',cache:'no-store'})
+    .then(function(){location.href='/';})
+    .catch(function(){ setTimeout(tryReconnect,2000); });
+}
+setTimeout(tick,1000);
+</script>
+</body>
+</html>
+REBOOTPAGE
+    reboot >/dev/null 2>&1 &
+    exit 0
+    ;;
+  restart_inet)
+    { echo "=== $(date) : restart inet ==="
+      /etc/init.d/network restart 2>/dev/null || true
+      /etc/init.d/dnsmasq restart 2>/dev/null || true
+      [ -x /etc/init.d/passwall ] && /etc/init.d/passwall restart 2>/dev/null || true
+      echo "=== done ==="; } >>"$LOG" 2>&1 &
+    redir "Интернет перезапускается…" "" ""
+    ;;
+  bypass_enable)
+    bypass_enable_all; redir "Обходы включены." "" ""
+    ;;
+  bypass_disable)
+    bypass_disable_all; redir "Обходы отключены." "" ""
+    ;;
+  update_wan)
+    proto="$(printf "%s" "${FORM_wan_proto:-dhcp}" | strip_newlines)"
+    IFACE="$(detect_wan_iface)"
+    uci -q get network."$IFACE" >/dev/null 2>&1 || uci -q set network."$IFACE"=interface 2>/dev/null || true
+    uci -q delete network."$IFACE".dns 2>/dev/null || true
+    case "$proto" in
+      dhcp)
+        uci -q set network."$IFACE".proto="dhcp" 2>/dev/null || true
+        uci -q delete network."$IFACE".username 2>/dev/null || true
+        uci -q delete network."$IFACE".password 2>/dev/null || true
+        uci -q delete network."$IFACE".server 2>/dev/null || true
+        uci -q delete network."$IFACE".peeraddr 2>/dev/null || true
+        uci -q delete network."$IFACE".ipaddr 2>/dev/null || true
+        uci -q delete network."$IFACE".netmask 2>/dev/null || true
+        uci -q delete network."$IFACE".gateway 2>/dev/null || true
+        ;;
+      static)
+        ip="$(printf "%s" "${FORM_static_ip:-}" | trim_spaces)"
+        mask="$(printf "%s" "${FORM_static_mask:-}" | trim_spaces)"
+        gw="$(printf "%s" "${FORM_static_gw:-}" | trim_spaces)"
+        d1="$(printf "%s" "${FORM_static_dns1:-}" | trim_spaces)"
+        d2="$(printf "%s" "${FORM_static_dns2:-}" | trim_spaces)"
+        is_ipv4 "$ip"   || redir "" "Статический IP: неверный IP-адрес." ""
+        is_ipv4 "$mask" || redir "" "Статический IP: неверная маска." ""
+        [ -n "$gw" ] && ! is_ipv4 "$gw" && redir "" "Статический IP: неверный шлюз." ""
+        [ -n "$d1" ] && ! is_ipv4 "$d1" && redir "" "DNS 1: неверный адрес." ""
+        [ -n "$d2" ] && ! is_ipv4 "$d2" && redir "" "DNS 2: неверный адрес." ""
+        uci -q set network."$IFACE".proto="static" 2>/dev/null || true
+        uci -q set network."$IFACE".ipaddr="$ip" 2>/dev/null || true
+        uci -q set network."$IFACE".netmask="$mask" 2>/dev/null || true
+        [ -n "$gw" ] && uci -q set network."$IFACE".gateway="$gw" || uci -q delete network."$IFACE".gateway 2>/dev/null || true
+        [ -n "$d1" ] && uci -q add_list network."$IFACE".dns="$d1" || true
+        [ -n "$d2" ] && uci -q add_list network."$IFACE".dns="$d2" || true
+        uci -q delete network."$IFACE".username 2>/dev/null || true
+        uci -q delete network."$IFACE".password 2>/dev/null || true
+        uci -q delete network."$IFACE".server 2>/dev/null || true
+        uci -q delete network."$IFACE".peeraddr 2>/dev/null || true
+        ;;
+      pppoe)
+        u="$(printf "%s" "${FORM_pppoe_user:-}" | strip_newlines)"
+        p="$(printf "%s" "${FORM_pppoe_pass:-}" | strip_newlines)"
+        is_ascii "$u" || redir "" "PPPoE логин: только латиница." ""
+        is_ascii "$p" || redir "" "PPPoE пароль: только латиница." ""
+        uci -q set network."$IFACE".proto="pppoe" 2>/dev/null || true
+        uci -q set network."$IFACE".username="$u" 2>/dev/null || true
+        uci -q set network."$IFACE".password="$p" 2>/dev/null || true
+        uci -q delete network."$IFACE".server 2>/dev/null || true
+        uci -q delete network."$IFACE".peeraddr 2>/dev/null || true
+        uci -q delete network."$IFACE".ipaddr 2>/dev/null || true
+        uci -q delete network."$IFACE".netmask 2>/dev/null || true
+        uci -q delete network."$IFACE".gateway 2>/dev/null || true
+        ;;
+      l2tp)
+        srv="$(printf "%s" "${FORM_l2tp_server:-}" | strip_newlines | trim_spaces)"
+        u="$(printf "%s" "${FORM_l2tp_user:-}" | strip_newlines)"
+        p="$(printf "%s" "${FORM_l2tp_pass:-}" | strip_newlines)"
+        [ -z "$srv" ] && redir "" "L2TP: укажите сервер." ""
+        is_ascii "$srv" || redir "" "L2TP сервер: только латиница." ""
+        is_ascii "$u" || redir "" "L2TP логин: только латиница." ""
+        is_ascii "$p" || redir "" "L2TP пароль: только латиница." ""
+        uci -q set network."$IFACE".proto="l2tp" 2>/dev/null || true
+        uci -q set network."$IFACE".server="$srv" 2>/dev/null || true
+        uci -q set network."$IFACE".peeraddr="$srv" 2>/dev/null || true
+        uci -q set network."$IFACE".username="$u" 2>/dev/null || true
+        uci -q set network."$IFACE".password="$p" 2>/dev/null || true
+        ;;
+      pptp)
+        srv="$(printf "%s" "${FORM_pptp_server:-}" | strip_newlines | trim_spaces)"
+        u="$(printf "%s" "${FORM_pptp_user:-}" | strip_newlines)"
+        p="$(printf "%s" "${FORM_pptp_pass:-}" | strip_newlines)"
+        [ -z "$srv" ] && redir "" "PPTP: укажите сервер." ""
+        is_ascii "$srv" || redir "" "PPTP сервер: только латиница." ""
+        is_ascii "$u" || redir "" "PPTP логин: только латиница." ""
+        is_ascii "$p" || redir "" "PPTP пароль: только латиница." ""
+        uci -q set network."$IFACE".proto="pptp" 2>/dev/null || true
+        uci -q set network."$IFACE".server="$srv" 2>/dev/null || true
+        uci -q set network."$IFACE".peeraddr="$srv" 2>/dev/null || true
+        uci -q set network."$IFACE".username="$u" 2>/dev/null || true
+        uci -q set network."$IFACE".password="$p" 2>/dev/null || true
+        ;;
+      *) redir "" "Неизвестный протокол WAN." "" ;;
+    esac
+    uci -q commit network >/dev/null 2>&1 || true
+    ensure_wan_zone_has_iface "$IFACE"
+    /etc/init.d/network reload >/dev/null 2>&1 || /etc/init.d/network restart >/dev/null 2>&1 || true
+    ifdown "$IFACE" >/dev/null 2>&1 || true
+    ifup "$IFACE" >/dev/null 2>&1 || true
+    redir "Настройки Интернета сохранены." "" ""
+    ;;
+  my_wifi)
+    ss24_raw="$(printf "%s" "${FORM_ssid_24:-}" | strip_newlines)"
+    ss24_chk="$(printf "%s" "$ss24_raw" | trim_spaces)"
+    [ -z "$ss24_chk" ] && redir "" "SSID 2.4 ГГц не может быть пустым." ""
+    is_ascii "$ss24_raw" || redir "" "SSID: латиница (пробелы разрешены)." ""
+    ss5_raw="$(printf "%s" "${FORM_ssid_5:-}" | strip_newlines)"
+    ss5_chk="$(printf "%s" "$ss5_raw" | trim_spaces)"
+    if [ -n "$ss5_chk" ]; then
+      is_ascii "$ss5_raw" || redir "" "SSID: латиница (пробелы разрешены)." ""
+    fi
+    k24="$(printf "%s" "${FORM_key_24:-}" | strip_newlines)"
+    k5="$(printf "%s" "${FORM_key_5:-}" | strip_newlines)"
+    if [ -n "$k24" ]; then
+      len_ge_8 "$k24" || redir "" "Пароль 2.4 ГГц: минимум 8 символов." ""
+      is_ascii_nospace "$k24" || redir "" "Пароль 2.4 ГГц: латиница, без пробелов." ""
+    fi
+    if [ -n "$k5" ]; then
+      len_ge_8 "$k5" || redir "" "Пароль 5 ГГц: минимум 8 символов." ""
+      is_ascii_nospace "$k5" || redir "" "Пароль 5 ГГц: латиница, без пробелов." ""
+    fi
+    uci -q set wireless.default_radio0.ssid="$ss24_raw" 2>/dev/null || true
+    uci -q set wireless.default_radio0.encryption="psk2" 2>/dev/null || true
+    uci -q set wireless.default_radio0.key="$k24" 2>/dev/null || true
+    uci -q set wireless.default_radio0.disabled="0" 2>/dev/null || true
+    if uci -q get wireless.radio1.type >/dev/null 2>&1; then
+      [ -n "$ss5_chk" ] && uci -q set wireless.default_radio1.ssid="$ss5_raw" 2>/dev/null || true
+      uci -q set wireless.default_radio1.encryption="psk2" 2>/dev/null || true
+      uci -q set wireless.default_radio1.key="$k5" 2>/dev/null || true
+      uci -q set wireless.default_radio1.disabled="0" 2>/dev/null || true
+    fi
+    uci -q commit wireless 2>/dev/null || true
+    redir "Wi-Fi сохранён." "" ""
+    ;;
+  passwall_update)
+    pw_exists || redir "" "Обходы не настроены." ""
+    NOW="$(date +%s)"
+    if [ -f "$LOCK" ]; then
+      TS="$(cat "$LOCK" 2>/dev/null || echo 0)"; AGE=$((NOW - TS))
+      [ "$AGE" -ge 0 ] && [ "$AGE" -lt 300 ] && redir "" "Обновление уже выполняется. Подождите." ""
+    fi
+    echo "$NOW" > "$LOCK" 2>/dev/null || true
+    chmod 666 "$LOCK" 2>/dev/null || true
+    lua /usr/share/passwall/rule_update.lua >>"$LOG" 2>&1; R1=$?
+    lua /usr/share/passwall/subscribe.lua >>"$LOG" 2>&1; R2=$?
+    if [ -x /usr/bin/YT_strategy_autoselect.sh ]; then
+      SYNC_ALL_DIRECT_FILES=1 PASSWALL_RELOAD_AFTER_DIRECT=1 /usr/bin/YT_strategy_autoselect.sh >>"$LOG" 2>&1 || true
+    fi
+    rm -f "$LOCK" 2>/dev/null || true
+    if [ "$R1" -eq 0 ] && [ "$R2" -eq 0 ]; then
+      redir "" "" "ok"
+    else
+      redir "" "" "bad"
+    fi
+    ;;
+  router_update_now)
+    SU="$(getcfg upd_script_url)"; VU="$(getcfg upd_version_url)"
+    [ -n "${SU:-}" ] || redir "" "URL update.sh не задан." ""
+    apply_update_script "$SU"
+    if [ -n "${VU:-}" ]; then
+      REMOTE_NOW="$(fetch "$VU" 2>/dev/null | tr -d '\r\n' | head -n1 || true)"
+      [ -n "${REMOTE_NOW:-}" ] && echo "$REMOTE_NOW" > "$UPD_STATE" 2>/dev/null || true
+    fi
+    redir "Скрипт обновления запущен." "" ""
+    ;;
+  pw_change_node)
+    pw_exists || redir "" "Обходы не настроены." ""
+    [ -n "${FORM_pw_node:-}" ] || redir "" "Не выбран сервер." ""
+    pw_apply_node "$FORM_pw_node"
+    redir "Сервер изменён." "" ""
+    ;;
+  yt_mode_apply)
+    case "${FORM_yt_mode:-}" in
+      main) main_mode_start ;;
+      backup) backup_mode_start ;;
+      *) redir "" "Не выбран режим YT." "" ;;
+    esac
+    redir "Режим YT сохранён." "" ""
+    ;;
+esac
+
+# ─── Данные для страницы ────────────────────────────────────────
+MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || true)"
+HOST="$(uci -q get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null || echo OpenWrt)"
+ROUTER_NAME="${MODEL:-$HOST}"
+LOAD="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0.00)"
+MEM_T="$(free -m 2>/dev/null | awk '/Mem:/{print $2}' || echo 0)"
+MEM_U="$(free -m 2>/dev/null | awk '/Mem:/{print $3}' || echo 0)"
+MEM_P=0; [ "$MEM_T" -gt 0 ] && MEM_P=$(( (MEM_U*100)/MEM_T ))
+
+WAN_IFACE="$(detect_wan_iface)"
+CUR_WAN="$(uci -q get network.${WAN_IFACE}.proto 2>/dev/null || echo "dhcp")"
+CUR_USER="$(uci -q get network.${WAN_IFACE}.username 2>/dev/null || echo "")"
+CUR_PASS="$(uci -q get network.${WAN_IFACE}.password 2>/dev/null || echo "")"
+CUR_SERVER="$(uci -q get network.${WAN_IFACE}.server 2>/dev/null || uci -q get network.${WAN_IFACE}.peeraddr 2>/dev/null || echo "")"
+CUR_IP="$(uci -q get network.${WAN_IFACE}.ipaddr 2>/dev/null || echo "")"
+CUR_MASK="$(uci -q get network.${WAN_IFACE}.netmask 2>/dev/null || echo "")"
+CUR_GW="$(uci -q get network.${WAN_IFACE}.gateway 2>/dev/null || echo "")"
+CUR_DNS="$(uci -q get network.${WAN_IFACE}.dns 2>/dev/null || echo "")"
+CUR_DNS1="$(printf "%s" "$CUR_DNS" | awk '{print $1}')"
+CUR_DNS2="$(printf "%s" "$CUR_DNS" | awk '{print $2}')"
+
+# Системный IP/шлюз — ищем WAN-интерфейс, затем ppp0/l2tp0, затем дефолтный маршрут
+SYS_WAN_IP="$(ip addr show "${WAN_IFACE}" 2>/dev/null | awk '/inet /{sub(/\/[0-9]+/,"",$2); print $2; exit}')"
+if [ -z "${SYS_WAN_IP:-}" ]; then
+  for _pif in ppp0 pppoe-wan pppoe-"${WAN_IFACE}" l2tp0 pptp0; do
+    SYS_WAN_IP="$(ip addr show "$_pif" 2>/dev/null | awk '/inet /{sub(/\/[0-9]+/,"",$2); print $2; exit}')"
+    [ -n "${SYS_WAN_IP:-}" ] && break
+  done
+fi
+if [ -z "${SYS_WAN_IP:-}" ]; then
+  _def_if="$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')"
+  [ -n "${_def_if:-}" ] && SYS_WAN_IP="$(ip addr show "$_def_if" 2>/dev/null | awk '/inet /{sub(/\/[0-9]+/,"",$2); print $2; exit}')"
+fi
+SYS_WAN_GW="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}' || true)"
+SYS_DNS="$(awk '/^nameserver/{printf "%s ",$2}' /etc/resolv.conf 2>/dev/null | head -c 80 || true)"
+[ -n "${SYS_DNS:-}" ] || SYS_DNS="—"
+# Статус WAN при первой загрузке страницы
+WAN_HAS_IP=0; [ -n "${SYS_WAN_IP:-}" ] && WAN_HAS_IP=1
+WAN_DOT_CLASS="bad"; [ "$WAN_HAS_IP" = "1" ] && WAN_DOT_CLASS="ok"
+SYS_WAN_IP_SHOW="${SYS_WAN_IP:-Нет IP}"
+SYS_WAN_GW_SHOW="${SYS_WAN_GW:-—}"
+WAN_DOT_CLASS="bad"; [ "$WAN_HAS_IP" = "1" ] && WAN_DOT_CLASS="ok"
+
+CUR_24_SSID="$(uci -q get wireless.default_radio0.ssid 2>/dev/null || echo "Atlanta 2.4Ghz")"
+CUR_24_KEY="$(uci -q get wireless.default_radio0.key 2>/dev/null || echo "11111111")"
+CUR_5_SSID="$(uci -q get wireless.default_radio1.ssid 2>/dev/null || echo "Atlanta 5Ghz")"
+CUR_5_KEY="$(uci -q get wireless.default_radio1.key 2>/dev/null || echo "11111111")"
+
+CUR_USER_CFG="$(getcfg user)"; CUR_PASS_CFG="$(getcfg pass)"
+CUR_YT_MODE="$(getcfg YT_mode)"
+case "$CUR_YT_MODE" in
+  vpn) CUR_YT_MODE="backup" ;;
+  zapret) CUR_YT_MODE="main" ;;
+esac
+[ -n "${CUR_YT_MODE:-}" ] || CUR_YT_MODE="main"
+
+DEFAULT_WARN="0"
+[ "$CUR_USER_CFG" = "admin" ] && [ "$CUR_PASS_CFG" = "admin" ] && DEFAULT_WARN="1"
+
+SEL_DHCP=""; SEL_PPPOE=""; SEL_L2TP=""; SEL_PPTP=""; SEL_STATIC=""
+case "$CUR_WAN" in
+  pppoe) SEL_PPPOE="selected" ;;
+  l2tp) SEL_L2TP="selected" ;;
+  pptp) SEL_PPTP="selected" ;;
+  static) SEL_STATIC="selected" ;;
+  *) SEL_DHCP="selected" ;;
+esac
+
+YT_MAIN_SEL=""; YT_BACKUP_SEL=""
+case "$CUR_YT_MODE" in
+  backup) YT_BACKUP_SEL="selected"; YT_MODE_LABEL="Запасной" ;;
+  *) YT_MAIN_SEL="selected"; YT_MODE_LABEL="Основной" ;;
+esac
+
+case "$(bypass_state)" in
+  on)
+    BYPASS_LABEL="Включены"
+    BYPASS_BTN="Отключить обходы"
+    BYPASS_ACT="bypass_disable"
+    BYPASS_DESC="Обходы активны"
+    BYPASS_DOT="ok"
+    ;;
+  *)
+    BYPASS_LABEL="Отключены"
+    BYPASS_BTN="Включить обходы"
+    BYPASS_ACT="bypass_enable"
+    BYPASS_DESC="Обходы выключены"
+    BYPASS_DOT="bad"
+    ;;
+esac
+
+INSTALLED_VER="$(cat "$UPD_STATE" 2>/dev/null | tr -d '\r\n' || true)"
+[ -n "${INSTALLED_VER:-}" ] || INSTALLED_VER="Не установлена"
+
+PW_CURRENT="$(pw_current_node)"; [ -n "${PW_CURRENT:-}" ] || PW_CURRENT=""
+PW_CURRENT_LABEL="$(pw_node_label "$PW_CURRENT")"
+
+PW_OPTIONS=""
+if pw_exists; then
+  PW_TMP="$(pw_nodes_list || true)"
+  if [ -n "${PW_TMP:-}" ]; then
+    echo "$PW_TMP" | while IFS="$(printf '\t')" read -r sec rem; do
+      [ -n "${sec:-}" ] || continue; [ -n "${rem:-}" ] || rem="$sec"
+      label="$rem"
+      case "$label" in AtlantaSwitch|ATLANTASWITCH|atlantaswitch) label="Авто (балансер)" ;; esac
+      case "$sec" in *AtlantaSwitch*|*ATLANTASWITCH*|*atlantaswitch*) label="Авто (балансер)" ;; esac
+      label="$(normalize_server_label "$label")"
+      ES_SEC="$(printf '%s' "$sec" | html_escape)"; ES_REM="$(printf '%s' "$label" | html_escape)"
+      if [ "$PW_CURRENT" = "$sec" ]; then
+        printf '<option value="%s" selected>%s</option>\n' "$ES_SEC" "$ES_REM"
+      else
+        printf '<option value="%s">%s</option>\n' "$ES_SEC" "$ES_REM"
+      fi
+    done > /tmp/atl_pw_opts.$$ 2>/dev/null || true
+    PW_OPTIONS="$(cat /tmp/atl_pw_opts.$$ 2>/dev/null || true)"
+    rm -f /tmp/atl_pw_opts.$$ 2>/dev/null || true
+  fi
+fi
+
+ES_NAME="$(printf '%s' "$ROUTER_NAME" | html_escape)"
+ES_MSG="$(printf '%s' "${MSG:-}" | html_escape)"
+ES_ERR="$(printf '%s' "${ERR:-}" | html_escape)"
+ES_WAN="$(printf '%s' "$CUR_WAN" | html_escape)"
+ES_WANIF="$(printf '%s' "$WAN_IFACE" | html_escape)"
+ES_MAC="$(printf '%s' "$MAC" | html_escape)"
+ES_UPD="$(printf '%s' "$UPD_STATUS" | html_escape)"
+ES_USER="$(printf '%s' "$CUR_USER" | html_escape)"
+ES_PASS="$(printf '%s' "$CUR_PASS" | html_escape)"
+ES_SERVER="$(printf '%s' "$CUR_SERVER" | html_escape)"
+ES_IP="$(printf '%s' "$CUR_IP" | html_escape)"
+ES_MASK="$(printf '%s' "$CUR_MASK" | html_escape)"
+ES_GW="$(printf '%s' "$CUR_GW" | html_escape)"
+ES_DNS1="$(printf '%s' "$CUR_DNS1" | html_escape)"
+ES_DNS2="$(printf '%s' "$CUR_DNS2" | html_escape)"
+ES_24_SSID="$(printf '%s' "$CUR_24_SSID" | html_escape)"
+ES_24_KEY="$(printf '%s' "$CUR_24_KEY" | html_escape)"
+ES_5_SSID="$(printf '%s' "$CUR_5_SSID" | html_escape)"
+ES_5_KEY="$(printf '%s' "$CUR_5_KEY" | html_escape)"
+ES_PU="$(printf '%s' "$CUR_USER_CFG" | html_escape)"
+ES_PP="$(printf '%s' "$CUR_PASS_CFG" | html_escape)"
+ES_INSTALLED_VER="$(printf '%s' "$INSTALLED_VER" | html_escape)"
+ES_PW_CURRENT_LABEL="$(printf '%s' "$PW_CURRENT_LABEL" | html_escape)"
+ES_YT_MODE="$(printf '%s' "$YT_MODE_LABEL" | html_escape)"
+ES_SYS_WAN_IP="$(printf '%s' "$SYS_WAN_IP_SHOW" | html_escape)"
+ES_SYS_WAN_GW="$(printf '%s' "$SYS_WAN_GW_SHOW" | html_escape)"
+ES_SYS_DNS="$(printf '%s' "$SYS_DNS" | html_escape)"
+
+echo "Content-type: text/html; charset=utf-8"
+echo ""
+cat <<HTML
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Atlanta Router</title>
+<style>
+/* ══ Variables ════════════════════════════════════════════════ */
+:root{
+  --bg:#000;
+  --s1:#0c0e15;--s2:#13151f;--s3:#1a1d28;
+  --b1:rgba(255,255,255,.07);--b2:rgba(255,255,255,.11);
+  --txt:#f0f4ff;--mut:rgba(240,244,255,.5);--dim:rgba(240,244,255,.3);
+  --acc:#0ab3ff;--acc2:#0070f0;--acc3:#0046c0;
+  --ok:#27c97a;--bad:#f04040;--warn:#f0b030;
+  --r:16px;--rs:10px;--rx:6px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+html{height:100%;-webkit-text-size-adjust:100%}
+body{min-height:100vh;color:var(--txt);font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;background:var(--bg);overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:99px}
+.wrap{width:min(1640px,calc(100vw - 32px));margin:0 auto;padding:16px 0 48px}
+.header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-icon{width:32px;height:32px;border-radius:8px;flex-shrink:0;background:linear-gradient(135deg,var(--acc),var(--acc3));display:flex;align-items:center;justify-content:center;font-size:16px}
+.brand h1{font-size:15px;font-weight:700;letter-spacing:-.2px;color:var(--txt)}
+.brand-sub{font-size:10px;color:var(--dim);margin-top:1px}
+.meta-chips{display:flex;gap:5px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
+.mchip{display:flex;align-items:center;gap:5px;background:var(--s1);border:1px solid var(--b1);border-radius:999px;padding:5px 10px;font-size:11px;font-weight:600}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex-shrink:0;box-shadow:0 0 0 3px rgba(39,201,122,.15);animation:lpulse 2.4s ease-in-out infinite}
+@keyframes lpulse{0%,100%{box-shadow:0 0 0 3px rgba(39,201,122,.15)}50%{box-shadow:0 0 0 5px rgba(39,201,122,.06)}}
+.status-bar{display:flex;gap:4px;flex-wrap:wrap;margin:0 0 10px}
+.si{display:flex;align-items:stretch;background:var(--s1);border:1px solid var(--b1);border-radius:8px;overflow:hidden;transition:border-color .15s}
+.si:hover{border-color:var(--b2)}
+.si-left{display:flex;align-items:center;gap:5px;padding:5px 9px}
+.si-right{display:none} /* текст скрыт — статус через цвет точки */
+.sdot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:rgba(255,255,255,.15);transition:background .4s,box-shadow .4s}
+.sdot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(39,201,122,.15)}
+.sdot.bad{background:var(--bad);box-shadow:0 0 0 3px rgba(240,64,64,.12)}
+.sdot.loading{animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:.15}50%{opacity:1}}
+.sname{font-size:11px;color:var(--txt);font-weight:600;white-space:nowrap}
+.sval{font-size:10px;font-weight:700;white-space:nowrap}
+.nav{display:flex;gap:4px;flex-wrap:wrap;margin:0 0 14px;padding:6px;background:var(--s1);border:1px solid var(--b1);border-radius:var(--r)}
+.nav a,.nav button{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:7px 13px;border-radius:var(--rs);border:0;background:transparent;min-height:36px;font-size:12px;font-weight:600;color:var(--mut);cursor:pointer;white-space:nowrap;transition:background .12s,color .12s,transform .08s;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+.nav a:hover,.nav button:hover{background:var(--s3);color:var(--txt)}
+.nav a:active,.nav button:active{transform:scale(.95)}
+.nav a.primary,.nav button.primary{background:linear-gradient(135deg,var(--acc),var(--acc2),var(--acc3));color:#fff;font-weight:700;box-shadow:0 2px 12px rgba(10,179,255,.2)}
+.nav a.primary:hover,.nav button.primary:hover{opacity:.9}
+.nav-sep{width:1px;background:var(--b1);margin:4px 2px}
+.msg,.okline{margin:8px 0;padding:10px 13px;border-radius:var(--rs);font-size:12px;font-weight:600;border:1px solid rgba(39,201,122,.18);background:rgba(39,201,122,.07);color:#80ffbb}
+.err,.badline{margin:8px 0;padding:10px 13px;border-radius:var(--rs);font-size:12px;font-weight:600;border:1px solid rgba(240,64,64,.18);background:rgba(240,64,64,.07);color:#ffaaaa}
+.main-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px;align-items:stretch}
+.main-grid > .win-col{display:flex;flex-direction:column;gap:10px}
+/* Последняя карточка в колонке растягивается до конца */
+.main-grid > .win-col > .card:last-child{flex:1}
+.bot-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+/* Password wrapper */
+.pw-wrap{position:relative;display:flex;align-items:center}
+.pw-wrap input{padding-right:38px;width:100%}
+.pw-eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);
+  background:none;border:none;color:var(--dim);cursor:pointer;
+  padding:4px;font-size:16px;line-height:1;
+  touch-action:manipulation;-webkit-user-select:none;user-select:none;
+  transition:color .15s}
+.pw-eye:hover{color:var(--txt)}
+.card{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);padding:14px;transition:border-color .15s;position:relative}
+.card:hover{border-color:var(--b2)}
+.card::before{content:"";position:absolute;top:0;left:12px;right:12px;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.06),transparent);border-radius:99px}
+.card-title{font-size:13px;font-weight:700;color:var(--txt);margin:0 0 10px;letter-spacing:-.1px;display:flex;align-items:center;gap:7px}
+.info-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px}
+.info-row:last-child{border-bottom:0;padding-bottom:0}
+.info-row:first-child{padding-top:0}
+.ir-label{color:var(--mut);font-weight:500;white-space:nowrap;font-size:12px}
+.ir-value{font-weight:700;text-align:right;word-break:break-all;font-size:12px}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700}
+.badge-ok{background:rgba(39,201,122,.1);color:var(--ok);border:1px solid rgba(39,201,122,.18)}
+.badge-bad{background:rgba(240,64,64,.08);color:var(--bad);border:1px solid rgba(240,64,64,.14)}
+.badge-blue{background:rgba(10,179,255,.1);color:var(--acc);border:1px solid rgba(10,179,255,.16)}
+.badge-warn{background:rgba(240,176,48,.08);color:var(--warn);border:1px solid rgba(240,176,48,.14)}
+.warn-box{display:none;margin-top:8px;padding:8px 11px;border-radius:var(--rx);border:1px solid rgba(240,176,48,.16);background:rgba(240,176,48,.06);color:#f5c030;font-size:11px;line-height:1.5}
+label{display:block;color:var(--dim);font-size:10px;font-weight:700;margin:9px 0 4px;text-transform:uppercase;letter-spacing:.5px}
+input,select{width:100%;background:var(--s2);border:1px solid var(--b1);color:var(--txt);padding:9px 12px;border-radius:var(--rs);outline:none;min-height:40px;font-size:13px;font-weight:500;transition:border-color .15s,box-shadow .15s}
+select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,rgba(255,255,255,.5) 50%),linear-gradient(135deg,rgba(255,255,255,.5) 50%,transparent 50%);background-position:calc(100% - 14px) calc(50% - 2px),calc(100% - 10px) calc(50% - 2px);background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:36px;font-weight:600;cursor:pointer}
+input:focus,select:focus{border-color:rgba(10,179,255,.4);box-shadow:0 0 0 3px rgba(10,179,255,.08)}
+option{background:#13151f;color:var(--txt);font-weight:600}
+input::placeholder{color:var(--dim)}
+.row{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+.btn{appearance:none;border-radius:var(--rs);padding:9px 14px;font-size:12px;font-weight:700;cursor:pointer;min-height:38px;transition:opacity .12s,transform .08s,box-shadow .12s;touch-action:manipulation;-webkit-user-select:none;user-select:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+.btn:active{transform:scale(.95)}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2),var(--acc3));color:#fff;border:0;font-weight:700;box-shadow:0 3px 12px rgba(10,179,255,.18)}
+.btn.primary:hover{opacity:.9;box-shadow:0 4px 16px rgba(10,179,255,.25)}
+.btn.secondary{background:var(--s3);color:var(--txt);border:1px solid var(--b2)}
+.btn.secondary:hover{background:rgba(255,255,255,.1)}
+.btn.danger{background:rgba(240,64,64,.08);color:#ff8888;border:1px solid rgba(240,64,64,.18)}
+.btn.danger:hover{background:rgba(240,64,64,.14)}
+.hint{color:var(--mut);padding:8px 11px;border-radius:var(--rx);border:1px solid var(--b1);background:rgba(255,255,255,.02);font-size:11px;line-height:1.5}
+.debug-section{margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.05)}
+.debug-title{font-size:10px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.debug-body{display:block;margin-top:0}
+.drow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:11px}
+.drow:last-child{border-bottom:0}
+.drow-k{color:var(--dim)}
+.drow-v{font-weight:700;font-family:'SF Mono',ui-monospace,monospace;font-size:10px;color:#7ec8ff;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
+.copywrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.copyid{font-weight:700;font-size:12px}
+.copybtn{border:1px solid var(--b1);background:var(--s2);color:var(--txt);border-radius:var(--rx);padding:4px 8px;cursor:pointer;min-height:28px;font-size:11px;font-weight:600;transition:background .12s;touch-action:manipulation}
+.copybtn:hover{background:var(--s3)}
+.toast{display:inline-block;color:var(--ok);font-weight:700;opacity:0;transition:opacity .2s;font-size:11px}
+.toast.on{opacity:1}
+.hidden{display:none !important}
+#burgerBtn{
+  display:none; /* показывается только в mobile media query */
+  width:42px;height:42px;
+  border:1px solid var(--b2);
+  border-radius:10px;
+  background:var(--s2);
+  color:var(--txt);font-size:20px;font-weight:800;
+  cursor:pointer;
+  touch-action:manipulation;-webkit-user-select:none;user-select:none;
+  align-items:center;justify-content:center;
+  flex-shrink:0;
+}
+#burgerBtn:active{opacity:.7}
+#burgerBtn.is-open{background:var(--acc);color:#fff;border-color:transparent}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:1200px){.main-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:800px){.main-grid,.bot-grid{grid-template-columns:1fr}}
+@media(max-width:860px),(hover:none) and (pointer:coarse){
+  /* Хедер: бренд слева, бургер справа */
+  .header{gap:8px;margin-bottom:6px}
+  .meta-chips{display:flex}
+  .mchip-stat{display:none}
+  input,select{font-size:16px !important}
+  #burgerBtn{display:inline-flex}
+
+  /* Nav: встроен в поток, скрыт по умолчанию */
+  .nav{
+    display:none;
+    flex-direction:column;
+    flex-wrap:nowrap;
+    gap:3px;
+    padding:6px;
+    margin:0 0 8px;
+    background:var(--s1);
+    border:1px solid var(--b1);
+    border-radius:var(--r);
+    animation:none;
+  }
+  .nav.is-open{display:flex}
+  .nav a,.nav button{
+    width:100%;
+    min-height:46px;
+    font-size:14px;
+    border-radius:8px;
+    justify-content:flex-start;
+    padding:11px 14px;
+    background:var(--s2);
+    border:1px solid var(--b1);
+    color:var(--txt);
+    font-weight:600;
+  }
+  .nav a.primary,.nav button.primary{
+    background:linear-gradient(135deg,var(--acc),var(--acc2),var(--acc3));
+    color:#fff;border:0;
+  }
+  .nav-sep{display:none}
+  .btn{min-height:42px}
+  .wrap{padding-bottom:32px}
+  .status-bar{gap:3px;flex-wrap:wrap}
+  .si-left{padding:4px 7px;gap:4px}
+  .si-right{display:none}
+  .sname{font-size:10px}
+  .si-wan .sval,.si-bypass .sval{font-size:10px}
+  .card{padding:12px}
+}
+
+@keyframes _spin{to{transform:rotate(360deg)}}
+#loadingOverlay{display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);align-items:center;justify-content:center;flex-direction:column;gap:18px}
+#loadingOverlay.on{display:flex !important}
+.ld-ring{width:56px;height:56px;border:4px solid rgba(255,255,255,.12);border-top-color:var(--acc);border-radius:50%;animation:_spin .75s linear infinite}
+.ld-text{font-size:16px;font-weight:700;color:#fff;text-align:center;max-width:280px;line-height:1.5}
+.ld-sub{font-size:12px;color:rgba(255,255,255,.5);text-align:center;max-width:280px;margin-top:-10px}
+</style>
+</head>
+<body>
+<div id="loadingOverlay">
+  <div class="ld-ring"></div>
+  <div class="ld-text" id="ld-text">Выполняется…</div>
+  <div class="ld-sub" id="ld-sub"></div>
+</div>
+
+
+<!-- Предупреждение о дефолтном пароле -->
+<div id="modal" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,7,13,.88);backdrop-filter:blur(6px);z-index:300;padding:16px" onclick="modalClose()">
+  <div style="max-width:480px;width:100%;background:#0d0f16;border:1px solid rgba(255,255,255,.1);border-radius:20px;padding:20px;animation:fadeUp .3s ease" onclick="event.stopPropagation()">
+    <h3 style="margin:0 0 10px;font-size:16px">⚠️ Смените данные для входа</h3>
+    <p style="margin:0 0 14px;color:var(--mut);line-height:1.6">Сейчас установлены стандартные данные: <b>admin / admin</b>. Перейдите в раздел <b>«Доступ к панели управления»</b> и задайте свои значения.</p>
+    <button class="btn primary" type="button" onclick="modalClose()" style="width:100%">Понятно</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="header">
+    <div class="brand">
+      <div class="brand-icon">🛡</div>
+      <div>
+        <h1>${ES_NAME}</h1>
+        <div class="brand-sub">Atlanta Router</div>
+      </div>
+    </div>
+    <div class="meta-chips">
+      <div class="mchip mchip-stat"><span class="live-dot"></span><b>Работает</b></div>
+      <div class="mchip mchip-stat">CPU <b>${LOAD}</b></div>
+      <div class="mchip mchip-stat">RAM <b>${MEM_P}%</b></div>
+      <div class="mchip mchip-mac">
+        <span style="color:var(--dim);font-size:11px;margin-right:2px">MAC</span>
+        <span id="deviceid" class="copyid">${ES_MAC}</span>
+        <button class="copybtn" type="button" onclick="copyText('deviceid')" style="padding:4px 8px;min-height:28px;font-size:11px">📋</button>
+        <span id="copied" class="toast">✓</span>
+      </div>
+    </div>
+    <!-- Бургер: только на мобиле -->
+    <button id="burgerBtn" type="button" onclick="menuToggle()" aria-label="Меню" autocomplete="off">☰</button>
+  </div>
+
+  <!-- ── Навигация ── -->
+  <nav class="nav" id="mainNav" role="navigation" aria-label="Главное меню">
+    <a class="primary" href="javascript:void(0)" onclick="menuBlank('${LINK_SUB}')">💎 Подписка</a>
+    <a href="javascript:void(0)" onclick="menuBlank('${LINK_SUPPORT}')">🎧 Поддержка</a>
+    <a href="javascript:void(0)" onclick="menuBlank('/instruction.html')">📘 Инструкция</a>
+    <div class="nav-sep"></div>
+    <button type="button" onclick="pact('restart_inet')">🔁 Перезапустить интернет</button>
+    <button class="primary" type="button" onclick="pact('passwall_update')">🔄 Обновить подписку</button>
+    <button type="button" onclick="pact('${BYPASS_ACT}')">${BYPASS_BTN}</button>
+    <div class="nav-sep"></div>
+    <button type="button" onclick="pact('router_update_now')">🧩 Обновить роутер</button>
+    <button type="button" onclick="pact('logout')" style="color:rgba(255,150,150,.8);border-color:rgba(240,82,82,.15)">🚪 Выйти</button>
+  </nav>
+
+  <!-- ── Статус сервисов ── -->
+  <div class="status-bar" id="statusBar">
+    <!-- WAN IP — отдельный чип с IP-адресом -->
+    <div class="si si-wan" title="Внешний IP роутера">
+      <div class="si-left">
+        <span class="sdot ${WAN_DOT_CLASS}" id="sdot-wan"></span>
+        <span class="sname" style="color:var(--dim);font-size:10px">WAN IP</span>
+        <span class="sval" id="sv-wan-ip" style="display:inline;margin-left:4px;font-size:11px;font-weight:800;color:var(--txt)">${ES_SYS_WAN_IP}</span>
+      </div>
+      <div class="si-right"></div>
+    </div>
+    <!-- Сервисы — точка + название -->
+    <div class="si" title="Интернет (ping 8.8.8.8)">
+      <div class="si-left"><span class="sdot loading" id="sdot-inet"></span><span class="sname">Интернет</span></div>
+      <div class="si-right"><span class="sval" id="sv-inet">…</span></div>
+    </div>
+    <div class="si" title="YT">
+      <div class="si-left"><span class="sdot loading" id="sdot-yt"></span><span class="sname">YT</span></div>
+      <div class="si-right"><span class="sval" id="sv-yt">…</span></div>
+    </div>
+    <div class="si" title="TG">
+      <div class="si-left"><span class="sdot loading" id="sdot-tg"></span><span class="sname">TG</span></div>
+      <div class="si-right"><span class="sval" id="sv-tg">…</span></div>
+    </div>
+    <div class="si" title="ВКонтакте">
+      <div class="si-left"><span class="sdot loading" id="sdot-vk"></span><span class="sname">ВКонтакте</span></div>
+      <div class="si-right"><span class="sval" id="sv-vk">…</span></div>
+    </div>
+    <div class="si" title="Instagram">
+      <div class="si-left"><span class="sdot loading" id="sdot-ig"></span><span class="sname">Instagram</span></div>
+      <div class="si-right"><span class="sval" id="sv-ig">…</span></div>
+    </div>
+    <div class="si" title="ИИ-сервисы (ChatGPT / Claude)">
+      <div class="si-left"><span class="sdot loading" id="sdot-ai"></span><span class="sname">ИИ</span></div>
+      <div class="si-right"><span class="sval" id="sv-ai">…</span></div>
+    </div>
+    <div class="si si-bypass" title="Обходы">
+      <div class="si-left">
+        <span class="sdot ${BYPASS_DOT}" id="sdot-bypass"></span>
+        <span class="sname">Обходы</span>
+        <span class="sval" id="sv-bypass" style="display:inline;margin-left:4px">${BYPASS_LABEL}</span>
+      </div>
+      <div class="si-right"></div>
+    </div>
+  </div>
+
+
+  ${ERR:+<div class="err">❌ ${ES_ERR}</div>}
+  ${MSG:+<div class="msg">✅ ${ES_MSG}</div>}
+  ${UPD_STATUS:+<div class="${UPD_COLOR}line">${ES_UPD}</div>}
+
+  <!-- ════ 3 колонки: WAN | WiFi+Обходы+Сервер | YT+Доступ+Обновление ════ -->
+  <div class="main-grid">
+
+    <!-- ── Колонка 1: Интернет ── -->
+    <div class="win-col">
+      <div class="card">
+        <div class="card-title">🌐 Настройки интернета</div>
+        <div class="info-row">
+          <span class="ir-label">Тип подключения</span>
+          <span class="ir-value"><span class="badge badge-ok">${ES_WAN}</span></span>
+        </div>
+        <div class="info-row">
+          <span class="ir-label">Интерфейс WAN</span>
+          <span class="ir-value" style="font-family:monospace;font-size:11px">${ES_WANIF}</span>
+        </div>
+        <div class="warn-box" id="wan-warn"></div>
+        <label>Тип подключения к интернету</label>
+        <select id="wan_proto" onchange="updateWanFields()">
+          <option value="dhcp" ${SEL_DHCP}>DHCP — автоматически от провайдера</option>
+          <option value="static" ${SEL_STATIC}>Статический IP — фиксированный адрес</option>
+          <option value="pppoe" ${SEL_PPPOE}>PPPoE — с логином и паролем</option>
+          <option value="l2tp" ${SEL_L2TP}>L2TP — VPN-туннель</option>
+          <option value="pptp" ${SEL_PPTP}>PPTP — VPN-туннель</option>
+        </select>
+        <div id="static_fields" class="hidden">
+          <label>IP-адрес (выдан провайдером)</label>
+          <input id="static_ip" value="${ES_IP}" placeholder="Например: 192.168.1.100">
+          <label>Маска подсети</label>
+          <input id="static_mask" value="${ES_MASK}" placeholder="Например: 255.255.255.0">
+          <label>Шлюз (адрес роутера провайдера)</label>
+          <input id="static_gw" value="${ES_GW}" placeholder="Например: 192.168.1.1">
+          <label>DNS-сервер 1</label>
+          <input id="static_dns1" value="${ES_DNS1}" placeholder="Например: 8.8.8.8">
+          <label>DNS-сервер 2 (резервный)</label>
+          <input id="static_dns2" value="${ES_DNS2}" placeholder="Например: 8.8.4.4">
+        </div>
+        <div id="pppoe_fields" class="hidden">
+          <label>Логин PPPoE (из договора с провайдером)</label>
+          <input id="pppoe_user" value="${ES_USER}" placeholder="Введите логин">
+          <label>Пароль PPPoE (из договора с провайдером)</label>
+          <div class="pw-wrap">
+            <input id="pppoe_pass" type="password" value="${ES_PASS}" placeholder="Введите пароль">
+            <button class="pw-eye" type="button" onclick="togglePw('pppoe_pass')">👁</button>
+          </div>
+        </div>
+        <div id="l2tp_fields" class="hidden">
+          <label>Адрес L2TP-сервера (IP или домен)</label>
+          <input id="l2tp_server" value="${ES_SERVER}" placeholder="Например: vpn.provider.ru">
+          <label>Логин L2TP</label>
+          <input id="l2tp_user" value="${ES_USER}" placeholder="Введите логин">
+          <label>Пароль L2TP</label>
+          <div class="pw-wrap">
+            <input id="l2tp_pass" type="password" value="${ES_PASS}" placeholder="Введите пароль">
+            <button class="pw-eye" type="button" onclick="togglePw('l2tp_pass')">👁</button>
+          </div>
+        </div>
+        <div id="pptp_fields" class="hidden">
+          <label>Адрес PPTP-сервера (IP или домен)</label>
+          <input id="pptp_server" value="${ES_SERVER}" placeholder="Например: vpn.provider.ru">
+          <label>Логин PPTP</label>
+          <input id="pptp_user" value="${ES_USER}" placeholder="Введите логин">
+          <label>Пароль PPTP</label>
+          <div class="pw-wrap">
+            <input id="pptp_pass" type="password" value="${ES_PASS}" placeholder="Введите пароль">
+            <button class="pw-eye" type="button" onclick="togglePw('pptp_pass')">👁</button>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn primary" style="flex:1" type="button" onclick="submitWan()">💾 Сохранить</button>
+          <button class="btn danger" type="button" onclick="pact('reboot')" title="Перезагрузить роутер">↺ Перезагрузка</button>
+        </div>
+        <div class="debug-section">
+        <div class="debug-title">📋 Диагностика соединения</div>
+        <div class="debug-body" id="dbgBody">
+          <div class="drow"><span class="drow-k">Интерфейс UCI</span><span class="drow-v">${ES_WANIF}</span></div>
+          <div class="drow"><span class="drow-k">Протокол</span><span class="drow-v">${ES_WAN}</span></div>
+          <div class="drow"><span class="drow-k">IP-адрес</span><span class="drow-v" id="dbg-ip">${ES_SYS_WAN_IP}</span></div>
+          <div class="drow"><span class="drow-k">Шлюз</span><span class="drow-v" id="dbg-gw">${ES_SYS_WAN_GW}</span></div>
+          <div class="drow"><span class="drow-k">DNS</span><span class="drow-v">${ES_SYS_DNS}</span></div>
+          <div class="drow"><span class="drow-k">Интернет</span><span class="drow-v" id="dbg-inet">…</span></div>
+          <div class="drow"><span class="drow-k">YT</span><span class="drow-v" id="dbg-yt">…</span></div>
+          <div class="drow"><span class="drow-k">ИИ-сервисы</span><span class="drow-v" id="dbg-ai">…</span></div>
+        </div>
+        </div><!-- /debug-section -->
+      </div>
+    </div>
+
+    <!-- ── Колонка 2: Wi-Fi + Обходы + Сервер ── -->
+    <div class="win-col">
+      <div class="card">
+        <div class="card-title">🏠 Настройки Wi-Fi</div>
+        <label>Название сети 2.4 ГГц</label>
+        <input id="ssid_24" value="${ES_24_SSID}" placeholder="Например: MyHome">
+        <label>Пароль Wi-Fi 2.4 ГГц — минимум 8 символов</label>
+        <div class="pw-wrap">
+          <input id="key_24" type="password" value="${ES_24_KEY}" placeholder="Минимум 8 символов">
+          <button class="pw-eye" type="button" onclick="togglePw('key_24')">👁</button>
+        </div>
+        <label>Название сети 5 ГГц</label>
+        <input id="ssid_5" value="${ES_5_SSID}" placeholder="Например: MyHome_5G">
+        <label>Пароль Wi-Fi 5 ГГц — минимум 8 символов</label>
+        <div class="pw-wrap">
+          <input id="key_5" type="password" value="${ES_5_KEY}" placeholder="Минимум 8 символов">
+          <button class="pw-eye" type="button" onclick="togglePw('key_5')">👁</button>
+        </div>
+        <div class="row">
+          <button class="btn primary" style="flex:1" type="button"
+            onclick="pact('my_wifi',{ssid_24:g('ssid_24').value,key_24:g('key_24').value,ssid_5:g('ssid_5').value,key_5:g('key_5').value})">
+            💾 Сохранить Wi-Fi
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🛡 Обходы</div>
+        <div class="info-row" style="border-bottom:0;padding-bottom:6px">
+          <span class="ir-label">Статус обходов</span>
+          <span id="bypass-label-card" class="badge badge-${BYPASS_DOT}">${BYPASS_LABEL}</span>
+        </div>
+        <p style="font-size:12px;color:var(--mut);margin:0 0 10px;line-height:1.5" id="bypass-desc">${BYPASS_DESC}</p>
+        <div class="row">
+          <button class="btn secondary" style="flex:1" id="bypassBtn" type="button" onclick="pact('${BYPASS_ACT}')">${BYPASS_BTN}</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🛰 Сервер</div>
+        <div class="info-row" style="border-bottom:0;padding-bottom:6px">
+          <span class="ir-label">Активный сервер</span>
+          <span class="ir-value" style="font-size:11px">${ES_PW_CURRENT_LABEL}</span>
+        </div>
+        <label>Выбрать другой сервер</label>
+        <select id="pw_node">${PW_OPTIONS}</select>
+        <div class="row">
+          <button class="btn primary" style="flex:1" type="button" onclick="pact('pw_change_node',{pw_node:g('pw_node').value})">Применить сервер</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Колонка 3: YT + Доступ + Обновление ── -->
+    <div class="win-col">
+      <div class="card">
+        <div class="card-title">▶️ Маршрут YT</div>
+        <div class="info-row" style="border-bottom:0;padding-bottom:6px">
+          <span class="ir-label">Текущий режим</span>
+          <span class="ir-value">${ES_YT_MODE}</span>
+        </div>
+        <label>Выбрать режим работы YT</label>
+        <select id="yt_mode">
+          <option value="main" ${YT_MAIN_SEL}>Основной</option>
+          <option value="backup" ${YT_BACKUP_SEL}>Запасной</option>
+        </select>
+        <div class="row">
+          <button class="btn primary" style="flex:1" type="button" onclick="pact('yt_mode_apply',{yt_mode:g('yt_mode').value})">💾 Сохранить режим</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🔐 Доступ к панели управления</div>
+        <label>Новый логин — только латинские буквы и цифры, минимум 5 символов</label>
+        <input id="new_user" value="" autocomplete="off" placeholder="Текущий: ${ES_PU} — введите новый">
+        <label>Новый пароль — только латинские буквы и цифры, минимум 8 символов</label>
+        <div class="pw-wrap">
+          <input id="new_pass" type="password" value="" autocomplete="new-password" placeholder="Введите новый пароль (мин. 8 символов)">
+          <button class="pw-eye" type="button" onclick="togglePw('new_pass')">👁</button>
+        </div>
+        <div class="row">
+          <button class="btn primary" style="flex:1" type="button"
+            onclick="pact('change_auth',{new_user:g('new_user').value,new_pass:g('new_pass').value})">
+            💾 Сохранить доступ
+          </button>
+        </div>
+        <p style="font-size:11px;color:var(--mut);margin:8px 0 0;line-height:1.6">После сохранения вас перенаправят на страницу входа с новыми данными.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🧩 Обновление роутера</div>
+        <div class="info-row" style="border-bottom:0;padding-bottom:6px">
+          <span class="ir-label">Установленная версия</span>
+          <span class="ir-value" style="font-size:11px;font-family:monospace">${ES_INSTALLED_VER}</span>
+        </div>
+        <p style="font-size:12px;color:var(--mut);margin:0 0 10px;line-height:1.5">Автоматическое обновление каждый день в 04:00. Можно запустить вручную.</p>
+        <div class="row">
+          <button class="btn secondary" style="flex:1" type="button" onclick="pact('router_update_now')">🔄 Обновить сейчас</button>
+          <button class="btn danger" type="button" onclick="pact('reboot')">↺ Перезагрузить</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- /main-grid -->
+
+  <!-- ══ Нижний блок: 2 колонки ══ -->
+  <div class="bot-grid" id="bottomCards">
+
+    <!-- ── Трафик ── -->
+    <div class="card">
+      <div class="card-title">📊 Трафик с момента загрузки</div>
+      <div class="info-row">
+        <span class="ir-label">Интерфейс WAN</span>
+        <span class="ir-value" id="st-iface" style="font-family:monospace;font-size:11px"><span style="color:var(--dim)">…</span></span>
+      </div>
+      <div class="info-row">
+        <span class="ir-label">↓ Получено данных</span>
+        <span class="ir-value" id="st-rx"><span style="color:var(--dim)">…</span></span>
+      </div>
+      <div class="info-row">
+        <span class="ir-label">↑ Отправлено данных</span>
+        <span class="ir-value" id="st-tx"><span style="color:var(--dim)">…</span></span>
+      </div>
+      <div class="info-row" style="border-bottom:0">
+        <span class="ir-label">Активных соединений</span>
+        <span class="ir-value" id="st-conn"><span style="color:var(--dim)">…</span></span>
+      </div>
+    </div>
+    <!-- ── Устройства ── -->
+    <div class="card" id="devCard">
+      <div class="card-title" style="justify-content:space-between">
+        <span>💻 Устройства</span>
+        <span id="dev-count" style="font-size:11px;color:var(--dim);font-weight:500"></span>
+      </div>
+      <div id="devList" style="display:grid;gap:0">
+        <div style="color:var(--dim);font-size:12px;padding:8px 0">Загрузка…</div>
+      </div>
+    </div>
+
+  </div><!-- /bottomCards -->
+
+</div><!-- /wrap -->
+
+<script>
+// ── helpers ──────────────────────────────────────────────────
+function g(id){ return document.getElementById(id); }
+
+var LOADING_MSGS = {
+  passwall_update:  ['🔄 Обновление подписки…',    'Загружаем серверы, это может занять 10–30 сек'],
+  router_update_now:['🧩 Обновление роутера…',     'Не закрывайте страницу'],
+  restart_inet:     ['🔁 Перезапуск интернета…',   'Займёт несколько секунд'],
+  bypass_enable:    ['🛡 Включение обходов…',       ''],
+  bypass_disable:   ['🛡 Отключение обходов…',      ''],
+  pw_change_node:   ['🛰 Смена сервера…',           'Переключаем VPN-сервер'],
+  my_wifi:          ['🏠 Сохранение Wi-Fi…',        'Роутер перезапустит Wi-Fi'],
+  update_wan:       ['🌐 Сохранение интернета…',    'Применяем настройки подключения'],
+  yt_mode_apply:    ['▶️ Сохранение режима…',       ''],
+  change_auth:      ['🔐 Сохранение доступа…',      'После сохранения войдите заново'],
+  reboot:           ['↺ Перезагрузка роутера…',     'Страница обновится автоматически'],
+  logout:           ['🚪 Выход…',                   ''],
+};
+function showLoading(action){
+  var ov=g('loadingOverlay'),tx=g('ld-text'),sb=g('ld-sub');
+  var msg=LOADING_MSGS[action]||['⏳ Выполняется…',''];
+  if(tx)tx.textContent=msg[0];
+  if(sb)sb.textContent=msg[1]||'';
+  if(ov)ov.classList.add('on');
+}
+function pact(action, extra){
+  menuClose();
+  showLoading(action);
+  var f = document.createElement('form');
+  f.method = 'POST'; f.action = '/cgi-bin/panel';
+  function add(k,v){ var i=document.createElement('input');i.type='hidden';i.name=k;i.value=v;f.appendChild(i); }
+  add('action', action);
+  if(extra){ for(var k in extra){ add(k, extra[k]); } }
+  document.body.appendChild(f);
+  setTimeout(function(){ f.submit(); }, 60);
+}
+
+async function copyText(id){
+  var el = g(id); var t = el ? el.textContent.trim() : '';
+  if(!t) return;
+  try{ await navigator.clipboard.writeText(t); }
+  catch(e){
+    var ta = document.createElement('textarea');
+    ta.value = t; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  var toast = g('copied');
+  if(toast){ toast.classList.add('on'); setTimeout(function(){ toast.classList.remove('on'); }, 1200); }
+}
+
+function menuBlank(link){ menuClose(); setTimeout(function(){ window.open(link,'_blank','noopener'); }, 50); }
+function modalClose(){ var m=g('modal'); if(m) m.style.display='none'; }
+
+// ── Burger menu ──────────────────────────────────────────────
+var _menuOpen = false;
+
+function menuOpen(){
+  if(_menuOpen) return;
+  _menuOpen = true;
+  var nav = document.getElementById('mainNav');
+  var btn = document.getElementById('burgerBtn');
+  if(nav) nav.classList.add('is-open');
+  if(btn){ btn.classList.add('is-open'); btn.textContent = '✕'; }
+}
+
+function menuClose(){
+  if(!_menuOpen) return;
+  _menuOpen = false;
+  var nav = document.getElementById('mainNav');
+  var btn = document.getElementById('burgerBtn');
+  if(nav) nav.classList.remove('is-open');
+  if(btn){ btn.classList.remove('is-open'); btn.textContent = '☰'; }
+}
+
+function menuToggle(){ _menuOpen ? menuClose() : menuOpen(); }
+
+// Закрытие тапом вне меню
+document.addEventListener('click', function(e){
+  if(!_menuOpen) return;
+  var btn = document.getElementById('burgerBtn');
+  if(btn && (btn === e.target || btn.contains(e.target))) return;
+  var nav = document.getElementById('mainNav');
+  if(nav && !nav.contains(e.target)) menuClose();
+});
+
+// ── WAN fields toggle ─────────────────────────────────────────
+function updateWanFields(){
+  var v = g('wan_proto') ? g('wan_proto').value : 'dhcp';
+  var ids = ['pppoe_fields','l2tp_fields','pptp_fields','static_fields'];
+  for(var i=0;i<ids.length;i++){
+    var el = g(ids[i]);
+    if(el) el.classList.toggle('hidden', ids[i] !== v + '_fields');
+  }
+}
+
+function submitWan(){
+  showLoading('update_wan');
+  setTimeout(_submitWanReal, 60);
+}
+function _submitWanReal(){
+  var proto = g('wan_proto') ? g('wan_proto').value : 'dhcp';
+  pact('update_wan',{
+    wan_proto: proto,
+    static_ip: g('static_ip')  ? g('static_ip').value  : '',
+    static_mask: g('static_mask') ? g('static_mask').value : '',
+    static_gw: g('static_gw')  ? g('static_gw').value  : '',
+    static_dns1: g('static_dns1') ? g('static_dns1').value : '',
+    static_dns2: g('static_dns2') ? g('static_dns2').value : '',
+    pppoe_user: g('pppoe_user') ? g('pppoe_user').value : '',
+    pppoe_pass: g('pppoe_pass') ? g('pppoe_pass').value : '',
+    l2tp_server: g('l2tp_server') ? g('l2tp_server').value : '',
+    l2tp_user: g('l2tp_user')  ? g('l2tp_user').value  : '',
+    l2tp_pass: g('l2tp_pass')  ? g('l2tp_pass').value  : '',
+    pptp_server: g('pptp_server') ? g('pptp_server').value : '',
+    pptp_user: g('pptp_user')  ? g('pptp_user').value  : '',
+    pptp_pass: g('pptp_pass')  ? g('pptp_pass').value  : ''
+  });
+}
+
+// ── Debug WAN toggle ──────────────────────────────────────────
+
+
+// ── Service status polling ────────────────────────────────────
+function setSdot(id, ok){
+  var el = g(id); if(!el) return;
+  el.className = 'sdot ' + (ok ? 'ok' : 'bad');
+}
+function setSval(id, txt){
+  var el = g(id); if(el) el.textContent = txt;
+}
+function setDbgRow(id, ok){
+  var el = g(id); if(!el) return;
+  el.textContent = ok ? '✅ Доступен' : '❌ Недоступен';
+  el.style.color = ok ? 'var(--ok)' : 'var(--bad)';
+}
+
+function applyStatus(d){
+  // WAN IP — обновляем только если пришло из API (актуальнее чем серверный рендер)
+  var wip = d.wan_ip || '';
+  setSval('sv-wan-ip', wip || 'Нет IP');
+  setSdot('sdot-wan', wip.length > 0);
+  setSval('dbg-ip', wip || 'Нет IP');
+  setSval('dbg-gw', d.wan_gw || '—');
+
+  // Сервисы — точка + текст
+  setSdot('sdot-inet', d.inet);   setSval('sv-inet', d.inet ? 'Работает' : 'Нет связи');
+  setSdot('sdot-yt',   d.YT); setSval('sv-yt',   d.YT ? 'Доступен' : 'Заблокирован');
+  setSdot('sdot-tg',   d.TG);setSval('sv-tg',   d.TG ? 'Доступен' : 'Заблокирован');
+  setSdot('sdot-vk',   d.vk);      setSval('sv-vk',   d.vk ? 'Доступен' : 'Заблокирован');
+  setSdot('sdot-ig',   d.instagram);setSval('sv-ig',  d.instagram ? 'Доступен' : 'Заблокирован');
+  setSdot('sdot-ai',   d.ai);      setSval('sv-ai',   d.ai ? 'Доступен' : 'Заблокирован');
+  var bOn = (d.bypass === 'on');
+  setSdot('sdot-bypass', bOn);
+  setSval('sv-bypass', bOn ? 'Включены' : 'Выключены');
+  var blc = g('bypass-label-card');
+  if(blc){
+    blc.textContent = bOn ? 'Включены' : 'Выключены';
+    blc.className = 'badge ' + (bOn ? 'badge-ok' : 'badge-bad');
+  }
+  var bdesc = g('bypass-desc');
+  if(bdesc){
+    bdesc.textContent = bOn
+      ? 'Обходы активны'
+      : 'Обходы выключены';
+  }
+  var bbtn = g('bypassBtn');
+  if(bbtn) bbtn.textContent = bOn ? 'Отключить обходы' : 'Включить обходы';
+
+  // Debug rows
+  setDbgRow('dbg-inet', d.inet);
+  setDbgRow('dbg-yt',   d.YT);
+  setDbgRow('dbg-ai',   d.ai);
+
+  // WAN warning — показываем ТОЛЬКО после получения ответа API
+  var warn = g('wan-warn');
+  if(warn){
+    if(!wip){
+      warn.innerHTML = '⚠️ Нет WAN IP — проверьте кабель или тип подключения. Для PPPoE IP может быть на интерфейсе <b>ppp0</b>.';
+      warn.style.display = 'block';
+    } else if(!d.inet){
+      warn.innerHTML = '⚠️ IP получен (<b>' + wip + '</b>), но интернет недоступен. Проверьте шлюз, DNS или данные PPPoE/L2TP.';
+      warn.style.display = 'block';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
+}
+
+function pollStatus(){
+  fetch('/cgi-bin/panel?action=api_status', {credentials:'include'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ applyStatus(d); })
+    .catch(function(){
+      // На ошибку просто снимаем loading-анимацию
+      var ids = ['sdot-inet','sdot-yt','sdot-tg','sdot-vk','sdot-ig','sdot-ai'];
+      for(var i=0;i<ids.length;i++){ setSdot(ids[i], false); }
+    });
+}
+
+// ── Format helpers ───────────────────────────────────────────
+function fmtBytes(b){
+  b=parseInt(b,10)||0;
+  if(b<1024)return b+' Б';
+  if(b<1048576)return (b/1024).toFixed(1)+' КБ';
+  if(b<1073741824)return (b/1048576).toFixed(1)+' МБ';
+  return (b/1073741824).toFixed(2)+' ГБ';
+}
+function escHtml(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Traffic stats ─────────────────────────────────────────────
+function fetchStats(){
+  fetch('/cgi-bin/panel?action=api_stats',{credentials:'include'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var el;
+      el=g('st-iface');if(el)el.textContent=d.iface||'—';
+      el=g('st-rx');   if(el)el.textContent=fmtBytes(d.rx_bytes);
+      el=g('st-tx');   if(el)el.textContent=fmtBytes(d.tx_bytes);
+      el=g('st-conn'); if(el)el.textContent=d.connections||'0';
+    }).catch(function(){});
+}
+
+// ── Devices ───────────────────────────────────────────────────
+function fetchDevices(){
+  fetch('/cgi-bin/panel?action=api_devices',{credentials:'include'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var list=g('devList'),cnt=g('dev-count');
+      if(!list)return;
+      var devs=d.devices||[];
+      devs.sort(function(a,b){return (b.active?1:0)-(a.active?1:0);});
+      var cntA=devs.filter(function(x){return x.active;}).length;
+      if(cnt)cnt.textContent=cntA+' активных / '+devs.length+' всего';
+      if(!devs.length){
+        list.innerHTML='<div style="color:var(--dim);font-size:12px;padding:8px 0">Устройства не обнаружены</div>';
+        return;
+      }
+      var html='';
+      for(var i=0;i<devs.length;i++){
+        var dv=devs[i];
+        var dot=dv.active
+          ?'<span style="width:7px;height:7px;border-radius:50%;background:var(--ok);flex-shrink:0;display:inline-block;box-shadow:0 0 0 2px rgba(39,201,122,.18)"></span>'
+          :'<span style="width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.18);flex-shrink:0;display:inline-block"></span>';
+        html+='<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04)">'
+          +dot
+          +'<div style="flex:1;min-width:0">'
+          +'<div style="font-weight:700;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(dv.name)+'</div>'
+          +'<div style="font-size:10px;color:var(--dim);font-family:monospace">'+escHtml(dv.ip)+'  '+escHtml(dv.mac)+'</div>'
+          +'</div></div>';
+      }
+      list.innerHTML=html;
+    }).catch(function(){
+      var list=g('devList');
+      if(list)list.innerHTML='<div style="color:var(--dim);font-size:12px;padding:8px 0">Нет данных</div>';
+    });
+}
+
+
+
+// ── Password toggle ──────────────────────────────────────────
+function togglePw(id){
+  var el = document.getElementById(id);
+  if(!el) return;
+  var isPw = (el.type === "password");
+  el.type = isPw ? "text" : "password";
+  // Ищем кнопку-глазок внутри того же pw-wrap
+  var wrap = el.parentNode;
+  var btn = wrap ? wrap.querySelector('.pw-eye') : null;
+  if(btn) btn.textContent = isPw ? "\uD83D\uDE48" : "\uD83D\uDC41";
+}
+
+
+// ── Init ──────────────────────────────────────────────────────
+window.addEventListener('load', function(){
+  if(${DEFAULT_WARN} === 1){
+    var m = g('modal'); if(m) m.style.display='flex';
+  }
+  updateWanFields();
+  // Stagger card animations
+  var cards = document.querySelectorAll('.card');
+  for(var i=0;i<cards.length;i++){
+    cards[i].style.opacity = '0';
+    cards[i].style.animation = 'fadeUp .35s ' + (0.05 + i*0.035) + 's ease both';
+    cards[i].style.animationFillMode = 'both';
+  }
+  pollStatus();
+  setInterval(pollStatus, 30000);
+  fetchDevices();
+  fetchStats();
+  setInterval(fetchDevices, 20000);
+  setInterval(fetchStats, 30000);
+});
+</script>
+</body>
+</html>
+HTML
+PANELFILE
+
+chmod 0755 "$PANEL"
+ok "CGI-скрипт записан"
+
+# ── [4/8] uhttpd ──────────────────────────────────────────────
+step "[4/8] Настраиваем uhttpd"
+uci -q set uhttpd.main.cgi_prefix='/cgi-bin'
+uci -q delete uhttpd.main.interpreter 2>/dev/null || true
+uci -q add_list uhttpd.main.interpreter='.sh=/bin/sh'
+uci -q set uhttpd.main.index_page='cgi-bin/panel'
+uci -q commit uhttpd
+ok "uhttpd настроен"
+
+# ── [5/8] Редирект-страница ───────────────────────────────────
+step "[5/8] Создаём страницу-редирект"
+cat > /www/index.html <<'ROOT'
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0;url=/cgi-bin/panel">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Atlanta Router</title>
+</head>
+<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#05070d;color:#eaf3ff;font-family:system-ui">
+  <div style="text-align:center">
+    <div style="font-size:32px;margin-bottom:8px">🛡</div>
+    <div>Перенаправление…</div>
+    <a href="/cgi-bin/panel" style="color:#2fe6ff">Открыть панель</a>
+  </div>
+</body>
+</html>
+ROOT
+ok "index.html готов"
+
+# ── [6/8] Wi-Fi ───────────────────────────────────────────────
+step "[6/8] Настраиваем Wi-Fi"
+uci -q set wireless.radio0.disabled='0' 2>/dev/null || true
+uci -q set wireless.radio1.disabled='0' 2>/dev/null || true
+
+if ! uci -q get wireless.default_radio0 >/dev/null 2>&1; then
+  uci -q set wireless.default_radio0=wifi-iface
+  uci -q set wireless.default_radio0.device='radio0'
+  uci -q set wireless.default_radio0.network='lan'
+  uci -q set wireless.default_radio0.mode='ap'
+fi
+uci -q set wireless.default_radio0.ssid="$WIFI_SSID_24"
+uci -q set wireless.default_radio0.encryption='psk2'
+uci -q set wireless.default_radio0.key="$WIFI_KEY"
+uci -q set wireless.default_radio0.disabled='0' 2>/dev/null || true
+
+if uci -q get wireless.radio1.type >/dev/null 2>&1; then
+  if ! uci -q get wireless.default_radio1 >/dev/null 2>&1; then
+    uci -q set wireless.default_radio1=wifi-iface
+    uci -q set wireless.default_radio1.device='radio1'
+    uci -q set wireless.default_radio1.network='lan'
+    uci -q set wireless.default_radio1.mode='ap'
+  fi
+  uci -q set wireless.default_radio1.ssid="$WIFI_SSID_5"
+  uci -q set wireless.default_radio1.encryption='psk2'
+  uci -q set wireless.default_radio1.key="$WIFI_KEY"
+  uci -q set wireless.default_radio1.disabled='0' 2>/dev/null || true
+fi
+uci -q commit wireless 2>/dev/null || true
+ok "Wi-Fi настроен"
+
+# ── [7/8] Сеть ────────────────────────────────────────────────
+step "[7/8] Настраиваем LAN"
+uci -q set network.lan.ipaddr="$LAN_IP"
+uci -q set network.lan.netmask="$LAN_MASK"
+uci -q commit network
+rm -f /www/cgi-bin/atl_netstatus 2>/dev/null || true
+
+# ── Добавляем atlanta.lan hostname ──────────────────────────────
+# 1. /etc/hosts
+grep -qF "atlanta.lan" /etc/hosts 2>/dev/null || echo "$LAN_IP atlanta.lan" >> /etc/hosts
+
+# 2. dnsmasq address record (работает даже если /etc/hosts не читается)
+DNSMASQ_CONF="/etc/dnsmasq.d/atlanta.conf"
+mkdir -p /etc/dnsmasq.d 2>/dev/null || true
+printf 'address=/atlanta.lan/%s\n' "$LAN_IP" > "$DNSMASQ_CONF"
+
+# 3. Разрешаем dnsmasq читать из /etc/dnsmasq.d/
+if ! uci -q get dhcp.@dnsmasq[0].confdir >/dev/null 2>&1; then
+  uci -q set dhcp.@dnsmasq[0].confdir='/etc/dnsmasq.d' 2>/dev/null || true
+  uci -q commit dhcp 2>/dev/null || true
+fi
+ok "LAN IP: $LAN_IP"
+
+# ── [8/8] Сервисы ─────────────────────────────────────────────
+step "[8/8] Перезапускаем сервисы"
+/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+info "uhttpd перезапущен"
+/etc/init.d/network restart >/dev/null 2>&1 || true
+info "Сеть перезапущена"
+/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+info "dnsmasq перезапущен (atlanta.lan активен)"
+
+# ── Финальный баннер ─────────────────────────────────────────
+printf '\n'
+printf "${CG}╔══════════════════════════════════════════╗${C0}\n"
+printf "${CG}║      ✅  ATLANTA PANEL УСТАНОВЛЕНА!      ║${C0}\n"
+printf "${CG}╠══════════════════════════════════════════╣${C0}\n"
+printf "${CG}║${C0}  Адрес панели:  ${CB}http://%s/${C0}%*s${CG}║${C0}\n" "$LAN_IP" "$((20 - ${#LAN_IP}))" ""
+printf "${CG}║${C0}  Логин:         ${CB}admin${C0}%*s${CG}║${C0}\n" 18 ""
+printf "${CG}║${C0}  Пароль:        ${CB}admin${C0}%*s${CG}║${C0}\n" 18 ""
+printf "${CG}╠══════════════════════════════════════════╣${C0}\n"
+printf "${CG}║${C0}  Wi-Fi 2.4 ГГц: ${CB}%s${C0}%*s${CG}║${C0}\n" "$WIFI_SSID_24" "$((25 - ${#WIFI_SSID_24}))" ""
+printf "${CG}║${C0}  Wi-Fi 5 ГГц:   ${CB}%s${C0}%*s${CG}║${C0}\n" "$WIFI_SSID_5" "$((26 - ${#WIFI_SSID_5}))" ""
+printf "${CG}║${C0}  Пароль Wi-Fi:  ${CB}%s${C0}%*s${CG}║${C0}\n" "$WIFI_KEY" "$((25 - ${#WIFI_KEY}))" ""
+printf "${CG}╠══════════════════════════════════════════╣${C0}\n"
+printf "${CG}║${C0}  Адрес (hostname): ${CB}http://atlanta.lan/${C0}%*s${CG}║${C0}\n" 15 ""
+printf "${CG}║${C0}  ${CY}⚠ Смените пароль панели после входа!${C0}   ${CG}║${C0}\n"
+printf "${CG}╚══════════════════════════════════════════╝${C0}\n\n"
+
+EOF
+
+sh /tmp/install_atlanta_panel_v2.sh
