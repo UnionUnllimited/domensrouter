@@ -70,24 +70,35 @@ sh parts/build.sh
 | `50-ru-unrouted.lst` | 738 | Выделены России, но сейчас не анонсируются. Оставлены на случай, когда поднимутся |
 | `90-ru-other.lst` | 4279 | Прочие российские сети — длинный хвост из региональных провайдеров и корпоративных AS |
 
-## parts/proxy — 111 доменов
+## parts/proxy — 3 домена
 
-Идут **через туннель**. Подключается как `gfwlist_url` (у PassWall это
-единственный список прокси, который обновляется по URL; `proxy_host`
-правится только локально). Списка прокси-адресов по URL не существует —
-`gfwlist` принимает только домены.
+Идут **через туннель**. Подключается как `gfwlist_url` + `gfwlist_update '1'`
+(единственный proxy-список, который PassWall обновляет по URL; принимает
+только домены, аналога для IP нет — `proxy_ip` правится лишь локально).
 
 | Файл | Записей | Что внутри |
 |---|---:|---|
-| `00-own-infra.lst` | 3 | Собственные панели: Nezha, Remnawave, titanvps.su |
-| `10-dev-github.lst` | 14 | GitHub, Docker Hub, GitLab, Hugging Face, JetBrains, HashiCorp |
-| `20-google-youtube.lst` | 10 | YouTube и его CDN |
-| `30-meta.lst` | 14 | Instagram, Facebook, WhatsApp, Threads |
-| `40-telegram.lst` | 8 | Telegram |
-| `50-social.lst` | 19 | X, Discord, LinkedIn, Signal, Reddit, TikTok |
-| `60-ai.lst` | 13 | OpenAI, Anthropic, Gemini, Perplexity, Midjourney |
-| `70-media.lst` | 17 | Netflix, Spotify, Twitch, SoundCloud, Patreon |
-| `80-saas-blocked.lst` | 13 | Notion, Figma, Slack, Zoom, Atlassian, PayPal |
+| `00-own-infra.lst` | 3 | Свои панели: Nezha, Remnawave, titanvps.su |
+
+### Почему список такой короткий
+
+При `tcp_proxy_mode 'proxy'` в туннель уходит всё, что не попало в direct.
+Значит GitHub, YouTube, Meta, Telegram и прочее заблокированное перечислять
+здесь незачем — они и так проксируются. Смысл есть только у исключений из
+direct, то есть у доменов, которые иначе перехватит `test.lst` или
+`testip.lst`.
+
+Из проверенных на этот счёт кандидатов перекрываются двое:
+
+- `nezha.mgsm163.ru` — резолвится в `31.130.155.214`, а это внутри
+  `31.130.128.0/19` из `testip.lst`. Без записи в gfwlist ушёл бы напрямую.
+- `titanvps.su` — зона `su` лежит в `test.lst`. Сейчас PassWall голые TLD
+  отбрасывает, но запись останется верной, если это починят или если домен
+  начнёт резолвиться в российский адрес.
+
+`remna-vpn.pandora361.online` (`207.2.120.99`) ничем из direct не
+перекрывается и проксируется по умолчанию — оставлен для полноты картины
+по своей инфраструктуре.
 
 ### Чего здесь намеренно нет
 
@@ -95,9 +106,8 @@ sh parts/build.sh
 `vbotrouters.titanvps.click` — канал удалённого доступа, подписка на ноды и
 зеркало самих списков. Если завернуть их в туннель, то при упавшем туннеле
 роутер не сможет ни обновить списки, ни получить ноды, ни быть доступным
-снаружи — ровно тогда, когда это нужнее всего. Поэтому в `00-own-infra.lst`
-добавлен только конкретный поддомен `remna-vpn.pandora361.online`,
-а не вся зона `pandora361.online`.
+снаружи — ровно тогда, когда это нужнее всего. Поэтому взят конкретный
+поддомен `remna-vpn.pandora361.online`, а не зона `pandora361.online`.
 
 ## Что не кладём в direct
 
