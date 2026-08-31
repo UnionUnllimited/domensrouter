@@ -41,7 +41,7 @@ resolve() {
 
 # psw_chn ведёт туда, куда указывает chn_list: direct, proxy или 0.
 # Считать его всегда прямым нельзя — при chn_list=proxy это туннель.
-CHN=$(uci -q get passwall.@global[0].tcp_proxy_mode >/dev/null;       uci -q get passwall.@global[0].chn_list)
+CHN=$(uci -q get passwall.@global[0].chn_list)
 case "$CHN" in
     direct) CHN_GOES=direct ;;
     proxy)  CHN_GOES=TUNNEL ;;
