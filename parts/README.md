@@ -28,14 +28,14 @@ sh parts/build.sh
 Порядок сортировки при сборке: домены — байтовый (`LC_ALL=C sort -u`),
 сети — числовой по адресу сети.
 
-## parts/domains — 1109 записей
+## parts/domains — 1170 записей
 
 | Файл | Записей | Что внутри |
 |---|---:|---|
 | `00-tld-zones.lst` | 15 | Целые зоны: `ru`, `su`, `by`, `moscow`, `tatar`, `yandex`, `ru.com`, `ru.net`. **13 из 15 PassWall отбрасывает** — `extract_domain()` в `rule_update.lua` требует точку в строке, поэтому голые TLD до роутера не доезжают. Доходят только `ru.com` и `ru.net`. Домены `*.ru` тянутся напрямую не из-за этих строк, а потому что их адреса попадают в `testip.lst` |
 | `01-idn-zones.lst` | 16 | Кириллические зоны и домены в них (`xn--p1ai` = рф, `xn--80asehdb` = онлайн и др.) |
 | `10-yandex.lst` | 69 | Яндекс и Yango, включая CDN и рекламные домены |
-| `11-vk-mail.lst` | 105 | VK, Mail.ru, Одноклассники, ICQ, My.Games |
+| `11-vk-mail.lst` | 109 | VK, Mail.ru, Одноклассники, ICQ, My.Games |
 | `12-sber.lst` | 7 | Сбер и GigaChat |
 | `20-banks-fintech.lst` | 43 | Банки, платёжные шлюзы, биржа, финтех |
 | `21-marketplace-retail.lst` | 87 | Маркетплейсы, ритейл, классифайды |
@@ -44,11 +44,11 @@ sh parts/build.sh
 | `24-maps.lst` | 13 | 2ГИС во всех странах присутствия |
 | `26-corporate.lst` | 8 | Сайты промышленных корпораций на `.com` (под санкциями, из-за рубежа часто недоступны) |
 | `30-telecom.lst` | 7 | Операторы связи |
-| `31-hosting-cloud-cdn.lst` | 71 | Хостинги, облака, CDN, конструкторы сайтов |
-| `32-security-av.lst` | 84 | Антивирусы и ИБ: Kaspersky, Dr.Web, F6/Group-IB, Positive Technologies |
+| `31-hosting-cloud-cdn.lst` | 75 | Хостинги, облака, CDN, конструкторы сайтов |
+| `32-security-av.lst` | 86 | Антивирусы и ИБ: Kaspersky, Dr.Web, F6/Group-IB, Positive Technologies |
 | `40-state-media.lst` | 111 | RT, Sputnik, Ruptly, ТАСС и прочее госмедиа. **Критично держать напрямую**: за рубежом эти домены блокируются, через туннель не откроются |
-| `41-media-streaming.lst` | 40 | Онлайн-кинотеатры, музыка, ТВ, погода |
-| `50-games.lst` | 69 | Игры и издатели, работающие в РФ: HoYoverse, Supercell, Krafton, Garena, Moonton, Kuro, Yostar, Axlebolt, Lesta, Wargaming, Gaijin и др. Трафик тяжёлый, а блокировок нет — туннель им только мешает |
+| `41-media-streaming.lst` | 47 | Онлайн-кинотеатры, музыка, ТВ, погода |
+| `50-games.lst` | 72 | Игры и издатели, работающие в РФ: HoYoverse, Supercell, Krafton, Garena, Moonton, Kuro, Yostar, Axlebolt, Lesta, Wargaming, Gaijin и др. Трафик тяжёлый, а блокировок нет — туннель им только мешает |
 | `51-steam-valve.lst` | 19 | Steam и остальная Valve, включая Deadlock |
 | `60-saas-martech.lst` | 120 | B2B SaaS, CRM, аналитика, виджеты, трекеры |
 | `70-it-content.lst` | 13 | IT-медиа и сообщества, RuStore |
@@ -56,6 +56,8 @@ sh parts/build.sh
 | `81-device-ota.lst` | 30 | Прошивки и обновления устройств: Xiaomi, Huawei, Samsung, OPPO, vivo, realme, OnePlus, Honor, плюс Apple и Windows Update |
 | `82-dev-registries.lst` | 16 | Репозитории пакетов: PyPI-файлы, npm, RubyGems, crates.io, Packagist, NuGet, Maven, Apache, GNU |
 | `83-asia.lst` | 9 | Китайские сервисы: Taobao, Tmall, Alipay, QQ, Bilibili, Baidu, JD |
+| `84-hardware-vendors.lst` | 11 | Драйверы и сайты производителей: AMD, GeForce, ASUS, MSI, Gigabyte, ASRock, Lenovo, HP, Acer, Logitech |
+| `85-desktop-software.lst` | 30 | Браузеры, шрифты и статика Google, десктопный софт: Blender, GIMP, OBS, VirtualBox, FFmpeg, qBittorrent, WinRAR |
 | `90-ip-speed-check.lst` | 60 | Проверка IP, DNS-утечек и скорости. Напрямую, иначе покажут адрес туннеля |
 | `99-other.lst` | 8 | Не поддалось классификации |
 
@@ -68,8 +70,14 @@ Windows. Кандидаты проверяются тремя фильтрами
 itdoginfo и haritos90, резолв через DoH и фактический ответ из России.
 
 По этой проверке в direct **не попали** `fedoraproject.org`, `manjaro.org`,
-`gnome.org`, `kde.org`, `pypi.org`, `temu.com`, `shein.com` и `mega.nz` —
-они значатся заблокированными, и прямой маршрут их бы сломал. Обратите
+`gnome.org`, `kde.org`, `pypi.org`, `temu.com`, `shein.com`, `mega.nz`,
+`nvidia.com`, `intel.com`, `dell.com`, `bitdefender.com`, `malwarebytes.com`,
+`clamav.net`, `avira.com` и `wetransfer.com` — они значатся заблокированными,
+и прямой маршрут их бы сломал.
+
+Отдельно отброшены `rufus.ie` и `imagemagick.org`: формально не заблокированы,
+но живут на GitHub Pages, а GitHub замедлен — напрямую они работали бы хуже,
+чем через туннель. Обратите
 внимание на пару `pypi.org` и `files.pythonhosted.org`: сам индекс в
 блок-листе, а хранилище пакетов нет, поэтому в direct ушло только второе.
 
