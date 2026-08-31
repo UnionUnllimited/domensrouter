@@ -152,16 +152,25 @@ def parents(d):
     return [".".join(p[i:]) for i in range(1, len(p))]
 
 if DNS:
-    import socket, concurrent.futures
-    socket.setdefaulttimeout(4)
+    import json, urllib.request, urllib.parse, concurrent.futures
 
+    # Резолвим только через DoH. Обычный резолвер внутри России подменяет
+    # ответы для заблокированного, и адрес заглушки — российский, то есть
+    # попадает в testip.lst. По такому резолву запись ложно выглядит
+    # оправданной.
     def resolve(d):
-        try:
-            return d, sorted({r[4][0] for r in socket.getaddrinfo(d, None, socket.AF_INET)})
-        except Exception:
-            return d, []
+        url = "https://dns.google/resolve?name=%s&type=A" % urllib.parse.quote(d)
+        for _ in range(2):
+            try:
+                req = urllib.request.Request(url, headers={"accept": "application/dns-json"})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    j = json.load(r)
+                return d, sorted({a["data"] for a in j.get("Answer", []) if a.get("type") == 1})
+            except Exception:
+                pass
+        return d, []
 
-    print("== обоснованность proxy (резолв) ==")
+    print("== обоснованность proxy (резолв через DoH) ==")
     with concurrent.futures.ThreadPoolExecutor(40) as ex:
         res = dict(ex.map(resolve, prx))
     for d in sorted(prx):
@@ -174,8 +183,9 @@ if DNS:
         elif par:
             print(f"  ok  {d} <- родитель {par[0]} в direct")
         else:
-            warn(f"{d} ничем из direct не перекрывается — запись лишняя, "
-                 f"домен и так уйдёт в туннель")
+            err(f"{d} ничем из direct не перекрывается — запись лишняя. "
+                f"В proxy место только тем, кого перехватывает direct: "
+                f"адресом из testip.lst или родительским доменом из test.lst")
 
 print()
 for w in warns:
