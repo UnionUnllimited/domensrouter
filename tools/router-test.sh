@@ -39,14 +39,27 @@ resolve() {
         awk '/^Address/ && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {a=$NF} END{print a}'
 }
 
+# psw_chn ведёт туда, куда указывает chn_list: direct, proxy или 0.
+# Считать его всегда прямым нельзя — при chn_list=proxy это туннель.
+CHN=$(uci -q get passwall.@global[0].tcp_proxy_mode >/dev/null;       uci -q get passwall.@global[0].chn_list)
+case "$CHN" in
+    direct) CHN_GOES=direct ;;
+    proxy)  CHN_GOES=TUNNEL ;;
+    *)      CHN_GOES=skip ;;
+esac
+MODE=$(uci -q get passwall.@global[0].tcp_proxy_mode)
+
 # Порядок как в nftables.sh: white -> black -> gfw -> chn -> замыкающее.
 route_of() {
     nft get element inet passwall psw_white  "{ $1 }" >/dev/null 2>&1 && { echo direct;  return; }
     nft get element inet passwall psw_black  "{ $1 }" >/dev/null 2>&1 && { echo TUNNEL;  return; }
     nft get element inet passwall psw_gfw    "{ $1 }" >/dev/null 2>&1 && { echo TUNNEL;  return; }
-    nft get element inet passwall psw_chn    "{ $1 }" >/dev/null 2>&1 && { echo direct;  return; }
+    if [ "$CHN_GOES" != skip ]; then
+        nft get element inet passwall psw_chn "{ $1 }" >/dev/null 2>&1 && {
+            echo "$CHN_GOES"; return; }
+    fi
     # Ни в одном наборе: решает tcp_proxy_mode.
-    if [ "$(uci -q get passwall.@global[0].tcp_proxy_mode)" = "disable" ]; then
+    if [ "$MODE" = "disable" ]; then
         echo direct
     else
         echo TUNNEL
