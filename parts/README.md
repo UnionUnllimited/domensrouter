@@ -28,7 +28,7 @@ sh parts/build.sh
 Порядок сортировки при сборке: домены — байтовый (`LC_ALL=C sort -u`),
 сети — числовой по адресу сети.
 
-## parts/domains — 1038 записей
+## parts/domains — 1109 записей
 
 | Файл | Записей | Что внутри |
 |---|---:|---|
@@ -44,17 +44,34 @@ sh parts/build.sh
 | `24-maps.lst` | 13 | 2ГИС во всех странах присутствия |
 | `26-corporate.lst` | 8 | Сайты промышленных корпораций на `.com` (под санкциями, из-за рубежа часто недоступны) |
 | `30-telecom.lst` | 7 | Операторы связи |
-| `31-hosting-cloud-cdn.lst` | 70 | Хостинги, облака, CDN, конструкторы сайтов |
+| `31-hosting-cloud-cdn.lst` | 71 | Хостинги, облака, CDN, конструкторы сайтов |
 | `32-security-av.lst` | 84 | Антивирусы и ИБ: Kaspersky, Dr.Web, F6/Group-IB, Positive Technologies |
 | `40-state-media.lst` | 111 | RT, Sputnik, Ruptly, ТАСС и прочее госмедиа. **Критично держать напрямую**: за рубежом эти домены блокируются, через туннель не откроются |
-| `41-media-streaming.lst` | 38 | Онлайн-кинотеатры, музыка, ТВ, погода |
+| `41-media-streaming.lst` | 40 | Онлайн-кинотеатры, музыка, ТВ, погода |
 | `50-games.lst` | 69 | Игры и издатели, работающие в РФ: HoYoverse, Supercell, Krafton, Garena, Moonton, Kuro, Yostar, Axlebolt, Lesta, Wargaming, Gaijin и др. Трафик тяжёлый, а блокировок нет — туннель им только мешает |
 | `51-steam-valve.lst` | 19 | Steam и остальная Valve, включая Deadlock |
 | `60-saas-martech.lst` | 120 | B2B SaaS, CRM, аналитика, виджеты, трекеры |
 | `70-it-content.lst` | 13 | IT-медиа и сообщества, RuStore |
-| `80-oss-updates.lst` | 15 | Свободный софт и обновления ОС |
+| `80-oss-updates.lst` | 28 | Свободный софт, дистрибутивы Linux и BSD |
+| `81-device-ota.lst` | 30 | Прошивки и обновления устройств: Xiaomi, Huawei, Samsung, OPPO, vivo, realme, OnePlus, Honor, плюс Apple и Windows Update |
+| `82-dev-registries.lst` | 16 | Репозитории пакетов: PyPI-файлы, npm, RubyGems, crates.io, Packagist, NuGet, Maven, Apache, GNU |
+| `83-asia.lst` | 9 | Китайские сервисы: Taobao, Tmall, Alipay, QQ, Bilibili, Baidu, JD |
 | `90-ip-speed-check.lst` | 60 | Проверка IP, DNS-утечек и скорости. Напрямую, иначе покажут адрес туннеля |
 | `99-other.lst` | 8 | Не поддалось классификации |
+
+### Зачем такой упор на тяжёлый трафик
+
+Всё, что не попало в direct, идёт через ноду и стоит денег. Поэтому сюда
+целенаправленно вынесено объёмное и при этом незаблокированное: Steam и игры,
+прошивки телефонов, дистрибутивы, репозитории пакетов, обновления Apple и
+Windows. Кандидаты проверяются тремя фильтрами — отсутствие в блок-листах
+itdoginfo и haritos90, резолв через DoH и фактический ответ из России.
+
+По этой проверке в direct **не попали** `fedoraproject.org`, `manjaro.org`,
+`gnome.org`, `kde.org`, `pypi.org`, `temu.com`, `shein.com` и `mega.nz` —
+они значатся заблокированными, и прямой маршрут их бы сломал. Обратите
+внимание на пару `pypi.org` и `files.pythonhosted.org`: сам индекс в
+блок-листе, а хранилище пакетов нет, поэтому в direct ушло только второе.
 
 ## parts/ip — 8662 сети
 
