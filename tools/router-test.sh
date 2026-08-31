@@ -50,13 +50,23 @@ esac
 MODE=$(uci -q get passwall.@global[0].tcp_proxy_mode)
 
 # Порядок как в nftables.sh: white -> black -> gfw -> chn -> замыкающее.
+#
+# У каждого набора есть парный *_static: обычный наполняется dnsmasq по
+# мере запросов, статический — из файла правил при старте службы. Правила
+# ставятся через nft_rule_dual, то есть на оба сразу. Опрашивать нужно
+# тоже оба, иначе адрес из файла выглядит как «нигде не найден»: сетей в
+# psw_chn_static было 11 731, а в psw_chn всего четыре.
+in_set() {
+    nft get element inet passwall "$1" "{ $2 }" >/dev/null 2>&1 && return 0
+    nft get element inet passwall "${1}_static" "{ $2 }" >/dev/null 2>&1
+}
+
 route_of() {
-    nft get element inet passwall psw_white  "{ $1 }" >/dev/null 2>&1 && { echo direct;  return; }
-    nft get element inet passwall psw_black  "{ $1 }" >/dev/null 2>&1 && { echo TUNNEL;  return; }
-    nft get element inet passwall psw_gfw    "{ $1 }" >/dev/null 2>&1 && { echo TUNNEL;  return; }
+    in_set psw_white "$1" && { echo direct; return; }
+    in_set psw_black "$1" && { echo TUNNEL; return; }
+    nft get element inet passwall psw_gfw "{ $1 }" >/dev/null 2>&1 && { echo TUNNEL; return; }
     if [ "$CHN_GOES" != skip ]; then
-        nft get element inet passwall psw_chn "{ $1 }" >/dev/null 2>&1 && {
-            echo "$CHN_GOES"; return; }
+        in_set psw_chn "$1" && { echo "$CHN_GOES"; return; }
     fi
     # Ни в одном наборе: решает tcp_proxy_mode.
     if [ "$MODE" = "disable" ]; then
