@@ -28,7 +28,7 @@ sh parts/build.sh
 Порядок сортировки при сборке: домены — байтовый (`LC_ALL=C sort -u`),
 сети — числовой по адресу сети.
 
-## parts/domains — 974 записи
+## parts/domains — 1018 записей
 
 | Файл | Записей | Что внутри |
 |---|---:|---|
@@ -48,8 +48,8 @@ sh parts/build.sh
 | `32-security-av.lst` | 84 | Антивирусы и ИБ: Kaspersky, Dr.Web, F6/Group-IB, Positive Technologies |
 | `40-state-media.lst` | 111 | RT, Sputnik, Ruptly, ТАСС и прочее госмедиа. **Критично держать напрямую**: за рубежом эти домены блокируются, через туннель не откроются |
 | `41-media-streaming.lst` | 36 | Онлайн-кинотеатры, музыка, ТВ, погода |
-| `50-games.lst` | 30 | Игры и издатели, живые в РФ |
-| `51-steam-valve.lst` | 18 | Steam и остальная Valve |
+| `50-games.lst` | 73 | Игры и издатели, работающие в РФ: HoYoverse, Supercell, Krafton, Garena, Moonton, Kuro, Yostar, Axlebolt, Lesta, Wargaming, Gaijin и др. Трафик тяжёлый, а блокировок нет — туннель им только мешает |
+| `51-steam-valve.lst` | 19 | Steam и остальная Valve, включая Deadlock |
 | `60-saas-martech.lst` | 118 | B2B SaaS, CRM, аналитика, виджеты, трекеры |
 | `70-it-content.lst` | 16 | IT-медиа и сообщества, RuStore |
 | `80-oss-updates.lst` | 16 | Свободный софт и обновления ОС |
