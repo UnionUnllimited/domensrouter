@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 """
-Проверка маршрутизации с компьютера за роутером.
+Проверка маршрутизации через роутер, минуя VPN на самом компьютере.
 
-    python tools/check-routing.py            все группы
-    python tools/check-routing.py ru         только российские
-    python tools/check-routing.py block      только заблокированные
-    python tools/check-routing.py -v         показывать адреса и время
+    python check-routing.py                     все группы
+    python check-routing.py ru                  только российские
+    python check-routing.py --list              показать интерфейсы и выйти
+    python check-routing.py --src 192.168.1.5   задать адрес вручную
+    python check-routing.py -v                  адреса и время
 
-Смысл: увидеть глазами, что схема «всё напрямую, кроме списка» работает.
-Российские сайты должны открываться, заблокированные — тоже, но через
-туннель. Если не открывается что-то из первой группы — список забрал
-лишнее. Если из второй — списка не хватает.
+На машине обычно поднят свой VPN-клиент, и он забирает маршрут по
+умолчанию. Тогда проверка уходит через него и говорит о клиенте, а не о
+роутере. Поэтому здесь два обхода:
 
-Важно: скрипт намеренно игнорирует HTTP_PROXY и HTTPS_PROXY. На машине
-может стоять свой VPN-клиент (например, на 127.0.0.1:10809), и запросы
-через него проверяли бы его, а не роутер.
+  * сокеты привязываются к адресу Wi-Fi (source address), и трафик идёт
+    тем интерфейсом, что смотрит в роутер;
+  * DNS спрашивается напрямую у шлюза, то есть у самого роутера. Это
+    важно: именно его ответы наполняют наборы nftables, а системный
+    резолвер через VPN дал бы совсем другую картину.
+
+Группы и смысл провалов:
+  Российские, Своя инфраструктура — proxy-список забрал лишнее
+  Заблокированные                 — домена нет в списке, ушёл в блок
+  Тяжёлые                         — смотреть руками, апексы CDN молчат
 """
-import sys, ssl, json, time, socket, urllib.request, urllib.error, concurrent.futures
+import sys, os, re, ssl, json, time, socket, struct, random, subprocess
+import http.client, urllib.request, urllib.error, concurrent.futures
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
-VERBOSE = "-v" in sys.argv
-ONLY = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
+ARGS = sys.argv[1:]
+VERBOSE = "-v" in ARGS
+LIST_ONLY = "--list" in ARGS
+SRC = ARGS[ARGS.index("--src") + 1] if "--src" in ARGS else None
 
 GROUPS = {
     "ru": ("Российские — должны идти напрямую", [
@@ -35,7 +45,7 @@ GROUPS = {
     ]),
     "heavy": ("Тяжёлые незаблокированные — тоже напрямую", [
         "steampowered.com", "steamcommunity.com", "hoyoverse.com", "yuanshen.com",
-        "xiaomi.com", "huawei.com", "samsung.com", "apple.com", "aliexpress.com",
+        "xiaomi.com", "samsung.com", "apple.com", "aliexpress.com",
         "npmjs.com", "rubygems.org", "almalinux.org", "blender.org", "twitch.tv",
     ]),
     "block": ("Заблокированные — должны идти через туннель", [
@@ -46,79 +56,220 @@ GROUPS = {
     ]),
     "infra": ("Своя инфраструктура — обязана быть напрямую", [
         "api1.titanvps.su", "vbotrouters.titanvps.click",
-        "sub-routers.pandora361.online", "remna-vpn.pandora361.online",
+        "sub-routers.pandora361.online",
     ]),
 }
+ONLY = next((a for a in ARGS if a in GROUPS), None)
 
-# Прокси окружения игнорируем: проверяем роутер, а не локальный клиент.
+
+# ── интерфейсы ───────────────────────────────────────────────────
+def interfaces():
+    """[(имя, ip, шлюз)] — разбором ipconfig на Windows, ip route на прочих."""
+    out = []
+    if os.name == "nt":
+        try:
+            raw = subprocess.run(["ipconfig"], capture_output=True, timeout=15).stdout
+        except Exception:
+            return out
+        txt = None
+        for enc in ("cp866", "cp1251", "utf-8"):
+            try:
+                txt = raw.decode(enc)
+                break
+            except Exception:
+                continue
+        if txt is None:
+            return out
+        name, ip, gw = None, None, None
+        for line in txt.splitlines():
+            if line.strip() and not line.startswith(" "):
+                if name and ip:
+                    out.append((name, ip, gw))
+                name, ip, gw = line.strip().rstrip(":"), None, None
+            m = re.search(r"IPv4.*?:\s*([0-9.]+)", line)
+            if m and ip is None:
+                ip = m.group(1)
+            m = re.search(r"(?:Default Gateway|Основной шлюз).*?:\s*([0-9.]+)", line)
+            if m and gw is None:
+                gw = m.group(1)
+        if name and ip:
+            out.append((name, ip, gw))
+    else:
+        try:
+            txt = subprocess.run(["ip", "-4", "route"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            for line in txt.splitlines():
+                m = re.match(r"default via ([0-9.]+) dev (\S+).*src ([0-9.]+)", line)
+                if m:
+                    out.append((m.group(2), m.group(3), m.group(1)))
+        except Exception:
+            pass
+    return out
+
+
+def pick(ifaces):
+    """Wi-Fi предпочтительнее: именно он смотрит в тестовый роутер."""
+    routed = [i for i in ifaces if i[2]]
+    for want in ("wi-fi", "wifi", "wireless", "беспровод", "wlan"):
+        for i in routed:
+            if want in i[0].lower():
+                return i
+    return routed[0] if routed else None
+
+
+ifaces = interfaces()
+if LIST_ONLY:
+    for n, i, g in ifaces:
+        print("  %-46s %-15s шлюз %s" % (n[:46], i, g or "нет"))
+    sys.exit(0)
+
+if SRC:
+    chosen = next((i for i in ifaces if i[1] == SRC), ("задан вручную", SRC, None))
+else:
+    chosen = pick(ifaces)
+if not chosen:
+    print("не нашёл интерфейс со шлюзом. Запустите с --list и укажите --src")
+    sys.exit(2)
+IFNAME, SRC, GW = chosen
+print("интерфейс: %s" % IFNAME)
+print("адрес:     %s   шлюз, он же DNS роутера: %s" % (SRC, GW or "не найден"))
+
+
+# ── DNS напрямую у роутера ───────────────────────────────────────
+def dns_a(name, server, src, timeout=4):
+    if not server:
+        return None
+    q = struct.pack(">HHHHHH", random.randint(0, 65535), 0x0100, 1, 0, 0, 0)
+    for part in name.split("."):
+        q += bytes([len(part)]) + part.encode()
+    q += b"\x00" + struct.pack(">HH", 1, 1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((src, 0))
+        s.settimeout(timeout)
+        s.sendto(q, (server, 53))
+        data, _ = s.recvfrom(2048)
+    except Exception:
+        return None
+    finally:
+        s.close()
+    try:
+        an = struct.unpack(">H", data[6:8])[0]
+        i = 12
+        while data[i]:
+            i += data[i] + 1
+        i += 5
+        for _ in range(an):
+            if data[i] & 0xC0:
+                i += 2
+            else:
+                while data[i]:
+                    i += data[i] + 1
+                i += 1
+            typ, _, _, dl = struct.unpack(">HHIH", data[i:i + 10])
+            i += 10
+            if typ == 1 and dl == 4:
+                return socket.inet_ntoa(data[i:i + 4])
+            i += dl
+    except Exception:
+        return None
+    return None
+
+
+# ── HTTPS: коннект по адресу от роутера, имя в SNI ───────────────
+# Принципиальный момент. Если соединяться по имени, urllib и curl
+# резолвят его СИСТЕМНЫМ резолвером, а он на этой машине смотрит в
+# VPN-адаптер. Тогда адрес в отчёте роутерный, а коннект уходит совсем
+# на другой — и проверка врёт. Поэтому соединяемся ровно на тот адрес,
+# который дал роутер, а хост передаём в SNI и в заголовке Host.
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-                                     urllib.request.HTTPSHandler(context=ctx))
+
+
+def fetch(host, ip, timeout=12):
+    s = socket.create_connection((ip, 443), timeout=timeout, source_address=(SRC, 0))
+    try:
+        with ctx.wrap_socket(s, server_hostname=host) as ss:
+            ss.settimeout(timeout)
+            req = (
+                "GET / HTTP/1.1\r\n"
+                "Host: %s\r\n"
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
+                "Accept: */*\r\n"
+                "Connection: close\r\n\r\n" % host
+            )
+            ss.sendall(req.encode())
+            head = ss.recv(256).decode("latin-1", "replace")
+        return int(head.split(" ")[1])
+    except Exception:
+        raise
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 def check(host):
     t0 = time.time()
-    try:
-        ip = socket.gethostbyname(host)
-    except Exception:
-        return host, None, None, "нет DNS", 0.0
-    req = urllib.request.Request("https://%s/" % host, method="GET",
-                                 headers={"User-Agent": "Mozilla/5.0"})
-    # Две попытки: одиночный обрыв соединения — не диагноз.
+    ip = dns_a(host, GW, SRC)
+    if ip is None:
+        return host, None, None, "нет DNS от роутера", 0.0
     last = None
     for _ in range(2):
         try:
-            with opener.open(req, timeout=12) as r:
-                return host, ip, r.status, None, time.time() - t0
-        except urllib.error.HTTPError as e:
-            return host, ip, e.code, None, time.time() - t0
+            return host, ip, fetch(host, ip), None, time.time() - t0
         except Exception as e:
             last = type(e).__name__
     return host, ip, None, last, time.time() - t0
 
 
 def egress():
-    for url in ("https://ipinfo.io/json", "https://api.myip.com"):
-        try:
-            with opener.open(urllib.request.Request(
-                    url, headers={"User-Agent": "curl/8"}), timeout=12) as r:
-                j = json.load(r)
-            return j.get("ip"), j.get("country") or j.get("cc"), j.get("org", "")
-        except Exception:
-            continue
-    return None, None, ""
+    ip = dns_a("ipinfo.io", GW, SRC)
+    if not ip:
+        return None, None, ""
+    try:
+        s = socket.create_connection((ip, 443), timeout=12, source_address=(SRC, 0))
+        with ctx.wrap_socket(s, server_hostname="ipinfo.io") as ss:
+            ss.sendall(b"GET /json HTTP/1.1\r\nHost: ipinfo.io\r\n"
+                       b"User-Agent: curl/8\r\nConnection: close\r\n\r\n")
+            buf = b""
+            while True:
+                c = ss.recv(4096)
+                if not c:
+                    break
+                buf += c
+        body = buf.split(b"\r\n\r\n", 1)[1]
+        if body[:1] != b"{":
+            body = body.split(b"\r\n", 1)[1]
+        j = json.loads(body[:body.rfind(b"}") + 1])
+        return j.get("ip"), j.get("country"), j.get("org", "")
+    except Exception:
+        return None, None, ""
 
 
-ip, cc, org = egress()
-print("внешний адрес: %s  страна: %s  %s" % (ip or "не определился", cc or "?", org))
-print("если страна не RU — значит наружу идёт весь трафик, а не только список\n")
+eip, cc, org = egress()
+print("внешний адрес: %s  страна: %s  %s" % (eip or "не определился", cc or "?", org))
+if cc and cc != "RU":
+    print("!! страна не RU. Либо схема не применилась и наружу идёт всё,")
+    print("!! либо привязка к интерфейсу не сработала и запросы ушли в VPN.")
+print()
 
-total_ok = total_bad = 0
+ok_n = bad_n = 0
 for key, (title, hosts) in GROUPS.items():
     if ONLY and ONLY != key:
         continue
     print("== %s ==" % title)
     with concurrent.futures.ThreadPoolExecutor(6) as ex:
         for host, addr, code, err, dt in ex.map(check, hosts):
-            ok = code is not None and code < 500
-            total_ok += ok
-            total_bad += not ok
-            mark = "  ok  " if ok else "ПРОВАЛ"
-            tail = ""
-            if VERBOSE:
-                tail = "  %-15s %4.1fс" % (addr or "-", dt)
-            print("  %s %-32s %s%s" % (mark, host, code if ok else err, tail))
+            good = code is not None and code < 500
+            ok_n += good
+            bad_n += not good
+            tail = "  %-15s %4.1fс" % (addr or "-", dt) if VERBOSE else ""
+            print("  %s %-32s %s%s" % ("  ok  " if good else "ПРОВАЛ",
+                                       host, code if good else err, tail))
     print()
 
-print("итог: открылось %d, не открылось %d" % (total_ok, total_bad))
-if total_bad:
-    print("\nЧто это значит:")
-    print("  провал в группе «Российские» или «Своя инфраструктура»")
-    print("     -> proxy-список забрал лишнее, домен уехал в туннель")
-    print("  провал в группе «Заблокированные»")
-    print("     -> домена нет в proxy-списке, он пошёл напрямую в блокировку")
-    print("  провал в группе «Тяжёлые»")
-    print("     -> проверьте вручную: часть CDN на корне не отвечает и это норма")
-sys.exit(1 if total_bad else 0)
+print("итог: открылось %d, не открылось %d" % (ok_n, bad_n))
+sys.exit(1 if bad_n else 0)
