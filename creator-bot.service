@@ -1,0 +1,14 @@
+[Unit]
+Description=TITAN VPS creator bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/creator_bot
+ExecStart=/opt/creator_bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
